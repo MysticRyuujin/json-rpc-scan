@@ -1,0 +1,30 @@
+# Release Please workflow
+# Automates versioning and changelog generation
+
+name: Release Please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      # Note: Uses PAT to allow triggering other workflows
+      # GITHUB_TOKEN cannot trigger other workflows (security feature)
+      - name: Run Release Please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          release-type: python
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}

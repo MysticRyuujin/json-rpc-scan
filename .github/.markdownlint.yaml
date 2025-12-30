@@ -1,0 +1,3 @@
+# Disable rules that conflict with GitHub template format
+# PR template can't start with a heading due to its structure
+MD041: false

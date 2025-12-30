@@ -1,0 +1,9 @@
+# Files to ignore for markdownlint
+LICENSE
+CHANGELOG.md
+node_modules/
+.venv/
+
+# GitHub templates (have YAML front matter)
+.github/PULL_REQUEST_TEMPLATE.md
+.github/ISSUE_TEMPLATE/

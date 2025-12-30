@@ -1,0 +1,3 @@
+# Disable rules that conflict with GitHub issue template format
+# These files have YAML front matter, so they can't start with a heading
+MD041: false

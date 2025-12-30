@@ -1,0 +1,50 @@
+# Example configuration for json-rpc-scan
+# Copy this file to config.yaml and modify as needed
+
+# List of Ethereum JSON-RPC endpoints to compare
+# Note: Client type is auto-detected from web3_clientVersion
+# The 'name' field is only used as a fallback if detection fails
+endpoints:
+  - name: Geth
+    url: http://localhost:8545
+    # Optional: Add custom headers
+    # headers:
+    #   Authorization: Bearer <token>
+
+  - name: Nethermind
+    url: http://localhost:8546
+
+  # Supported clients: Geth, Nethermind, Erigon, Besu, Reth, Nimbus, Ethrex
+  # Unknown clients are also supported (all methods/tracers assumed available)
+
+# Optional: Global settings
+# settings:
+#   timeout: 30  # Request timeout in seconds
+#   concurrent_requests: 10  # Max concurrent requests
+
+# Optional: Compatibility overrides
+# Use these to customize which methods/tracers are tested, regardless of
+# the built-in client compatibility matrix
+#
+# This is useful for:
+# - Testing unknown/custom clients that don't match known patterns
+# - Skipping methods that are known to be broken or slow
+# - Force-testing methods that the tool thinks aren't supported
+compatibility:
+  # Methods to always skip (even if client reports support)
+  # skip_methods:
+  #   - debug_traceCall  # Skip if this method is too slow or broken
+
+  # Tracers to always skip (even if client reports support)
+  # Use "structLogger" for the default opcode logger (no tracer)
+  # skip_tracers:
+  #   - prestateTracer  # Skip prestate tracer tests
+  #   - 4byteTracer     # Skip 4byte tracer tests
+
+  # Methods to force-enable (even if client doesn't report support)
+  # force_methods:
+  #   - debug_traceTransaction  # Force test even if marked unsupported
+
+  # Tracers to force-enable (even if client doesn't report support)
+  # force_tracers:
+  #   - callTracer  # Force test callTracer even on Besu

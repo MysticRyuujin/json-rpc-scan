@@ -1,0 +1,40 @@
+# yamllint configuration
+# See: https://yamllint.readthedocs.io/
+#
+# Extends the default ruleset with project-specific overrides.
+# Only non-default values are specified below.
+
+extends: default
+
+rules:
+  # Allow longer lines for URLs and complex CI configs (default: 80)
+  line-length:
+    max: 120
+    allow-non-breakable-inline-mappings: true
+
+  # Single space from content for inline comments (default: 2)
+  comments:
+    min-spaces-from-content: 1
+
+  # Don't check keys for truthy values (default: true)
+  truthy:
+    check-keys: false
+
+  # No document start/end markers required (default: enabled)
+  document-start: disable
+  document-end: disable
+
+  # Allow trailing blank line (default: 0)
+  empty-lines:
+    max-end: 1
+
+  # Allow space inside braces for readability (default: 0)
+  braces:
+    max-spaces-inside: 1
+
+  # Allow quotes for consistency in CI configs (default: only-when-needed)
+  quoted-strings:
+    required: false
+
+  # Allow flexible comment indentation (default: enabled)
+  comments-indentation: disable

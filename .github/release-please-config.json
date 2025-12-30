@@ -1,0 +1,37 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    ".": {
+      "release-type": "python",
+      "package-name": "json-rpc-scan",
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
+      "draft": false,
+      "prerelease": false,
+      "changelog-path": "CHANGELOG.md",
+      "changelog-type": "github",
+      "versioning": "default",
+      "extra-files": [
+        "pyproject.toml",
+        {
+          "type": "json",
+          "path": "src/json_rpc_scan/__version__.py",
+          "jsonpath": "$.version"
+        }
+      ],
+      "changelog-sections": [
+        { "type": "feat", "section": "Features" },
+        { "type": "fix", "section": "Bug Fixes" },
+        { "type": "perf", "section": "Performance Improvements" },
+        { "type": "revert", "section": "Reverts" },
+        { "type": "docs", "section": "Documentation" },
+        { "type": "style", "section": "Styles" },
+        { "type": "chore", "section": "Miscellaneous Chores", "hidden": true },
+        { "type": "refactor", "section": "Code Refactoring" },
+        { "type": "test", "section": "Tests", "hidden": true },
+        { "type": "build", "section": "Build System", "hidden": true },
+        { "type": "ci", "section": "Continuous Integration", "hidden": true }
+      ]
+    }
+  }
+}

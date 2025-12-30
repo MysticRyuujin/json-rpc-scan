@@ -1,0 +1,65 @@
+# markdownlint configuration
+# See: https://github.com/DavidAnson/markdownlint
+#
+# Only non-default values are specified below.
+
+default: true
+
+# MD010/no-hard-tabs - Allow tabs in code blocks
+MD010:
+  code_blocks: false
+
+# MD012/no-multiple-blanks - Allow up to 2 blank lines (default: 1)
+MD012:
+  maximum: 2
+
+# MD013/line-length - Allow longer lines (default: 80)
+MD013:
+  line_length: 120
+  code_blocks: false
+  tables: false
+
+# MD024/no-duplicate-heading - Only check siblings (default: false)
+MD024:
+  siblings_only: true
+
+# MD025/single-title - Don't check front matter
+MD025:
+  front_matter_title: ""
+
+# MD033/no-inline-html - Allow common HTML elements
+MD033:
+  allowed_elements:
+    - br
+    - details
+    - summary
+    - kbd
+    - sup
+    - sub
+
+# MD035/hr-style - Consistent horizontal rule style
+MD035:
+  style: "---"
+
+# MD041/first-line-heading - Don't check front matter
+MD041:
+  front_matter_title: ""
+
+# MD044/proper-names - Disabled (too noisy with project names)
+MD044: false
+
+# MD046/code-block-style - Use fenced code blocks
+MD046:
+  style: fenced
+
+# MD048/code-fence-style - Use backticks
+MD048:
+  style: backtick
+
+# MD049/emphasis-style - Use asterisks
+MD049:
+  style: asterisk
+
+# MD050/strong-style - Use asterisks
+MD050:
+  style: asterisk

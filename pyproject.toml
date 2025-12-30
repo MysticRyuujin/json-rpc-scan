@@ -1,0 +1,187 @@
+[project]
+name = "json-rpc-scan"
+version = "0.1.0"
+description = "Scans Ethereum (EVM) Blocks via JSON-RPC and looks for client diffs"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Chase Wright" }]
+requires-python = ">=3.13"
+keywords = ["ethereum", "json-rpc", "blockchain", "evm", "diff"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Testing",
+    "Typing :: Typed",
+]
+dependencies = [
+    "httpx>=0.28.0",
+    "pyyaml>=6.0",
+    "tqdm>=4.67.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=25.0.0",
+    "mypy>=1.19.0",
+    "pre-commit>=4.5.0",
+    "pytest>=9.0.0",
+    "pytest-asyncio>=1.0.0",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.14.0",
+    "types-pyyaml>=6.0.0",
+    "types-tqdm>=4.67.0",
+]
+
+[project.scripts]
+json-rpc-scan = "json_rpc_scan.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/MysticRyuujin/json-rpc-scan"
+Repository = "https://github.com/MysticRyuujin/json-rpc-scan"
+Issues = "https://github.com/MysticRyuujin/json-rpc-scan/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/json_rpc_scan"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src"]
+
+# =============================================================================
+# Black - Code Formatter
+# =============================================================================
+[tool.black]
+line-length = 88
+target-version = ["py313"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.eggs
+  | \.git
+  | \.hatch
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+# =============================================================================
+# Ruff - Linter
+# =============================================================================
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "ARG",    # flake8-unused-arguments
+    "SIM",    # flake8-simplify
+    "TCH",    # flake8-type-checking
+    "PTH",    # flake8-use-pathlib
+    "ERA",    # eradicate (commented out code)
+    "PL",     # Pylint
+    "RUF",    # Ruff-specific rules
+    "ASYNC",  # flake8-async
+]
+ignore = [
+    "PLR0913",  # Too many arguments
+    "PLR2004",  # Magic value comparison
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["json_rpc_scan"]
+force-single-line = false
+lines-after-imports = 2
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["ARG001", "PLR2004"]
+# Runners override base class methods, so unused args are expected
+"src/json_rpc_scan/runners/*.py" = ["ARG002", "PLR0912"]
+
+# =============================================================================
+# MyPy - Type Checker
+# =============================================================================
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+show_column_numbers = true
+pretty = true
+plugins = []
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+# =============================================================================
+# Pytest - Testing
+# =============================================================================
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = [
+    "-ra",
+    "-q",
+    "--strict-markers",
+    "--strict-config",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+]
+
+# =============================================================================
+# Coverage
+# =============================================================================
+[tool.coverage.run]
+source = ["src/json_rpc_scan"]
+branch = true
+parallel = true
+omit = ["src/json_rpc_scan/__main__.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]
+show_missing = true
+fail_under = 80
+
+# =============================================================================
+# Bandit - Security Scanner
+# =============================================================================
+[tool.bandit]
+exclude_dirs = ["tests", ".venv", "venv"]
+skips = ["B101"]  # Skip assert warnings in non-test code
