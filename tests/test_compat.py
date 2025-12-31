@@ -1,5 +1,10 @@
 """Tests for client compatibility detection."""
 
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from json_rpc_scan.client import Endpoint, RPCClient, RPCResponse
 from json_rpc_scan.compat import (
     ClientInfo,
     ClientType,
@@ -7,10 +12,26 @@ from json_rpc_scan.compat import (
     detect_client_type,
     filter_methods,
     filter_tracers,
+    get_client_info,
     is_method_supported,
     is_tracer_supported,
     tracer_name,
 )
+
+
+class TestClientInfo:
+    """Tests for ClientInfo dataclass."""
+
+    def test_short_name(self):
+        """Test short_name property."""
+        info = ClientInfo(ClientType.GETH, "Geth/v1.0", "Geth")
+        assert info.short_name == "geth"
+
+        info = ClientInfo(ClientType.NETHERMIND, "Nethermind/v1.0", "Nethermind")
+        assert info.short_name == "nethermind"
+
+        info = ClientInfo(ClientType.UNKNOWN, "Unknown/v1.0", "Unknown")
+        assert info.short_name == "unknown"
 
 
 class TestClientDetection:
@@ -149,6 +170,20 @@ class TestFiltering:
         assert "callTracer" in skipped
         assert "prestateTracer" in skipped
 
+    def test_filter_methods_unsupported(self):
+        """Methods not supported by both clients are skipped."""
+        # Geth doesn't support eth_getBlockReceipts (False), but Nethermind does (True)
+        geth = ClientInfo(ClientType.GETH, "Geth/v1.0", "Geth")
+        nethermind = ClientInfo(ClientType.NETHERMIND, "Nethermind/v1.0", "Nethermind")
+
+        supported, skipped = filter_methods(
+            geth, nethermind, ["eth_getBlockReceipts", "eth_blockNumber"]
+        )
+        # eth_blockNumber is supported by both
+        assert "eth_blockNumber" in supported
+        # eth_getBlockReceipts is NOT supported by Geth, so it should be skipped
+        assert "eth_getBlockReceipts" in skipped
+
 
 class TestCompatOverrides:
     """Tests for compatibility overrides."""
@@ -224,3 +259,65 @@ class TestTracerName:
     def test_tracer_name_call_tracer(self):
         """Named tracer displays as-is."""
         assert tracer_name("callTracer") == "callTracer"
+
+
+class TestGetClientInfo:
+    """Tests for get_client_info function."""
+
+    @pytest.mark.asyncio
+    async def test_get_client_info_success(self):
+        """Test successful client info retrieval."""
+        endpoint = Endpoint(name="test", url="http://localhost:8545")
+        mock_response = RPCResponse(
+            endpoint=endpoint,
+            request={},
+            response={"jsonrpc": "2.0", "id": 1, "result": "Geth/v1.13.0"},
+        )
+
+        mock_client = AsyncMock(spec=RPCClient)
+        mock_client.call = AsyncMock(return_value=mock_response)
+
+        info = await get_client_info(mock_client, endpoint)
+
+        assert info.client_type == ClientType.GETH
+        assert info.name == "Geth"
+        assert "Geth/v1.13.0" in info.version_string
+
+    @pytest.mark.asyncio
+    async def test_get_client_info_error(self):
+        """Test client info retrieval with error response."""
+        endpoint = Endpoint(name="test", url="http://localhost:8545")
+        mock_response = RPCResponse(
+            endpoint=endpoint,
+            request={},
+            response={},
+            error="Connection refused",
+        )
+
+        mock_client = AsyncMock(spec=RPCClient)
+        mock_client.call = AsyncMock(return_value=mock_response)
+
+        info = await get_client_info(mock_client, endpoint)
+
+        assert info.client_type == ClientType.UNKNOWN
+        assert info.name == "Unknown"
+        assert "Error: Connection refused" in info.version_string
+
+    @pytest.mark.asyncio
+    async def test_get_client_info_non_string_result(self):
+        """Test client info with non-string result."""
+        endpoint = Endpoint(name="test", url="http://localhost:8545")
+        mock_response = RPCResponse(
+            endpoint=endpoint,
+            request={},
+            response={"jsonrpc": "2.0", "id": 1, "result": 12345},
+        )
+
+        mock_client = AsyncMock(spec=RPCClient)
+        mock_client.call = AsyncMock(return_value=mock_response)
+
+        info = await get_client_info(mock_client, endpoint)
+
+        # Should convert to string and try to detect
+        assert isinstance(info.version_string, str)
+        assert "12345" in info.version_string

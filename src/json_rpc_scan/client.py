@@ -60,6 +60,7 @@ class RPCClient:
         """Exit async context."""
         if self._client:
             await self._client.aclose()
+            self._client = None
 
     async def call(
         self,

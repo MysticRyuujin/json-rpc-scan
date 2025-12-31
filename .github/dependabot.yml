@@ -3,11 +3,6 @@
 
 version: 2
 
-registries:
-  python-index:
-    type: python-index
-    url: https://pypi.org/simple
-
 updates:
   # Python dependencies (pip/uv)
   - package-ecosystem: pip
@@ -18,22 +13,13 @@ updates:
       time: "09:00"
       timezone: "Etc/UTC"
     open-pull-requests-limit: 10
-    registries:
-      - python-index
     labels:
       - "dependencies"
       - "python"
     commit-message:
       prefix: "chore(deps)"
     groups:
-      # Group minor and patch updates together
-      python-minor-patch:
-        patterns:
-          - "*"
-        update-types:
-          - "minor"
-          - "patch"
-      # Group development dependencies
+      # Group development dependencies (more specific patterns first)
       python-dev:
         patterns:
           - "black"
@@ -46,9 +32,22 @@ updates:
           - "major"
           - "minor"
           - "patch"
+      # Group minor and patch updates for production dependencies
+      python-minor-patch:
+        patterns:
+          - "httpx"
+          - "pyyaml"
+          - "tqdm"
+        update-types:
+          - "minor"
+          - "patch"
     ignore:
-      # Ignore major version updates for stability
-      - dependency-name: "*"
+      # Ignore major version updates for production dependencies only
+      - dependency-name: "httpx"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "pyyaml"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "tqdm"
         update-types: ["version-update:semver-major"]
 
   # GitHub Actions
