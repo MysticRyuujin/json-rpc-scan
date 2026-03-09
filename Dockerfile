@@ -46,7 +46,7 @@ FROM python:${PYTHON_VERSION}-slim AS production
 # Labels for OCI image spec
 LABEL org.opencontainers.image.title="json-rpc-scan" \
       org.opencontainers.image.description="Scans Ethereum (EVM) Blocks via JSON-RPC and looks for client diffs" \
-      org.opencontainers.image.source="https://github.com/chase/json-rpc-scan" \
+      org.opencontainers.image.source="https://github.com/MysticRyuujin/json-rpc-scan" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.authors="Chase Wright"
 
