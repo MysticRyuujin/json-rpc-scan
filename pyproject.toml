@@ -1,6 +1,6 @@
 [project]
 name = "json-rpc-scan"
-version = "0.0.2"
+version = "0.1.1"
 description = "Scans Ethereum (EVM) Blocks via JSON-RPC and looks for client diffs"
 readme = "README.md"
 license = { text = "MIT" }
