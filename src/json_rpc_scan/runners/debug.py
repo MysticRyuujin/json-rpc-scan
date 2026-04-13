@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 from tqdm import tqdm
 
-from json_rpc_scan.runners.base import BaseRunner, RunnerResult
+from json_rpc_scan.runners.base import BaseRunner, RunnerResult, tx_to_call_obj
 
 
 if TYPE_CHECKING:
@@ -128,6 +128,13 @@ def tracer_name(tracer: str | None) -> str:
     return tracer if tracer else "structLogger"
 
 
+def _with_trace_params(base: list[Any], trace_params: dict[str, Any]) -> list[Any]:
+    """Append trace config to params list if non-empty."""
+    if trace_params:
+        return [*base, trace_params]
+    return base
+
+
 class DebugTraceBlockByNumberRunner(BaseRunner):
     """Runner for debug_traceBlockByNumber.
 
@@ -143,40 +150,16 @@ class DebugTraceBlockByNumberRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run debug_traceBlockByNumber tests across a block range."""
-        trace_config = kwargs.get("trace_config", TraceConfig())
-        trace_params = trace_config.to_params()
+        trace_params = kwargs.get("trace_config", TraceConfig()).to_params()
+        total = end_block - start_block + 1
 
-        tests_run = 0
-        diff_count = 0
-        total_blocks = end_block - start_block + 1
+        def inputs() -> list[tuple[str, list[Any]]]:
+            return [
+                (f"block_{n}", _with_trace_params([hex(n)], trace_params))
+                for n in range(start_block, end_block + 1)
+            ]
 
-        with tqdm(total=total_blocks, desc=self.method_name, unit="blk") as pbar:
-            for block_num in range(start_block, end_block + 1):
-                tests_run += 1
-                params: list[Any] = [hex(block_num)]
-                if trace_params:
-                    params.append(trace_params)
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff at block {block_num}")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"block_{block_num}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} blocks, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        return await self.compare_over(inputs(), total=total, unit="blk")
 
 
 class DebugTraceBlockByHashRunner(BaseRunner):
@@ -194,48 +177,19 @@ class DebugTraceBlockByHashRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run debug_traceBlockByHash tests across a block range."""
-        trace_config = kwargs.get("trace_config", TraceConfig())
-        trace_params = trace_config.to_params()
+        trace_params = kwargs.get("trace_config", TraceConfig()).to_params()
 
-        tests_run = 0
-        diff_count = 0
-        total_blocks = end_block - start_block + 1
+        inputs: list[tuple[str, list[Any]]] = []
+        for block_num in range(start_block, end_block + 1):
+            block = await self.client.get_block(
+                self.endpoints[0], block_num, full_transactions=False
+            )
+            if not block or not block.get("hash"):
+                continue
+            params = _with_trace_params([block["hash"]], trace_params)
+            inputs.append((f"block_{block_num}", params))
 
-        with tqdm(total=total_blocks, desc=self.method_name, unit="blk") as pbar:
-            for block_num in range(start_block, end_block + 1):
-                block = await self.client.get_block(
-                    self.endpoints[0], block_num, full_transactions=False
-                )
-                if not block or not block.get("hash"):
-                    pbar.update(1)
-                    continue
-
-                block_hash = block["hash"]
-                tests_run += 1
-                params: list[Any] = [block_hash]
-                if trace_params:
-                    params.append(trace_params)
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff at block {block_num} ({block_hash[:16]}...)")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"block_{block_num}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} blocks, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        return await self.compare_over(inputs, total=len(inputs), unit="blk")
 
 
 class DebugTraceTransactionRunner(BaseRunner):
@@ -253,58 +207,27 @@ class DebugTraceTransactionRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run debug_traceTransaction for all transactions in a block range."""
-        trace_config = kwargs.get("trace_config", TraceConfig())
-        trace_params = trace_config.to_params()
+        trace_params = kwargs.get("trace_config", TraceConfig()).to_params()
 
-        # Collect all transaction hashes first
         self.log(f"{self.method_name}: Scanning for transactions...")
-        tx_list: list[tuple[int, str]] = []
-
+        inputs: list[tuple[str, list[Any]]] = []
         for block_num in range(start_block, end_block + 1):
             block = await self.client.get_block(
                 self.endpoints[0], block_num, full_transactions=True
             )
-            if block and block.get("transactions"):
-                for tx in block["transactions"]:
-                    if isinstance(tx, dict) and tx.get("hash"):
-                        tx_list.append((block_num, tx["hash"]))
+            if not block or not block.get("transactions"):
+                continue
+            for tx in block["transactions"]:
+                if isinstance(tx, dict) and tx.get("hash"):
+                    params = _with_trace_params([tx["hash"]], trace_params)
+                    inputs.append((f"tx_{tx['hash']}", params))
 
-        if not tx_list:
+        if not inputs:
             self.log(f"{self.method_name}: No transactions found")
             return RunnerResult(self.method_name, 0, 0)
 
-        self.log(f"{self.method_name}: Found {len(tx_list)} transactions")
-
-        tests_run = 0
-        diff_count = 0
-
-        with tqdm(total=len(tx_list), desc=self.method_name, unit="tx") as pbar:
-            for block_num, tx_hash in tx_list:
-                tests_run += 1
-                params: list[Any] = [tx_hash]
-                if trace_params:
-                    params.append(trace_params)
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff for tx {tx_hash[:16]}... (block {block_num})")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"tx_{tx_hash}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} txs, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        self.log(f"{self.method_name}: Found {len(inputs)} transactions")
+        return await self.compare_over(inputs, total=len(inputs), unit="tx")
 
 
 class DebugTraceCallRunner(BaseRunner):
@@ -314,6 +237,9 @@ class DebugTraceCallRunner(BaseRunner):
     Also validates that trace results are consistent with on-chain tx status:
     - If a tx succeeded on-chain but trace errors, that indicates a bug.
     - If a tx failed on-chain, we expect the trace to also show an error.
+
+    Multi-variant runner: per tx, compares endpoints AND checks each endpoint's
+    trace output against the on-chain receipt status independently.
     """
 
     method_name = "debug_traceCall"
@@ -325,36 +251,30 @@ class DebugTraceCallRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run debug_traceCall by replaying transactions from a block range."""
-        trace_config = kwargs.get("trace_config", TraceConfig())
-        trace_params = trace_config.to_params()
+        trace_params = kwargs.get("trace_config", TraceConfig()).to_params()
 
-        # Collect transactions to replay with their on-chain status
         self.log(f"{self.method_name}: Scanning for transactions...")
-        # tx_list entries: (block_num, tx_hash, call_obj, tx_succeeded)
+        # Entries are (block_num, tx_hash, call_obj, tx_succeeded).
         tx_list: list[tuple[int, str, dict[str, Any], bool]] = []
 
         for block_num in range(start_block, end_block + 1):
             block = await self.client.get_block(
                 self.endpoints[0], block_num, full_transactions=True
             )
-            if block and block.get("transactions"):
-                for tx in block["transactions"]:
-                    if isinstance(tx, dict):
-                        call_obj = self._tx_to_call(tx)
-                        tx_hash = tx.get("hash", f"unknown_{block_num}")
-
-                        # Get receipt to determine on-chain success/failure
-                        receipt = await self.client.get_transaction_receipt(
-                            self.endpoints[0], tx_hash
-                        )
-                        # status: 0x1 = success, 0x0 = failure (post-Byzantium)
-                        # Pre-Byzantium txs may not have status field
-                        tx_succeeded = True
-                        if receipt and receipt.get("status"):
-                            tx_succeeded = receipt["status"] == "0x1"
-
-                        tx_list.append((block_num, tx_hash, call_obj, tx_succeeded))
+            if not block or not block.get("transactions"):
+                continue
+            for tx in block["transactions"]:
+                if not isinstance(tx, dict):
+                    continue
+                call_obj = tx_to_call_obj(tx)
+                tx_hash = tx.get("hash", f"unknown_{block_num}")
+                receipt = await self.client.get_transaction_receipt(
+                    self.endpoints[0], tx_hash
+                )
+                tx_succeeded = True
+                if receipt and receipt.get("status"):
+                    tx_succeeded = receipt["status"] == "0x1"
+                tx_list.append((block_num, tx_hash, call_obj, tx_succeeded))
 
         if not tx_list:
             self.log(f"{self.method_name}: No transactions found")
@@ -369,40 +289,44 @@ class DebugTraceCallRunner(BaseRunner):
         with tqdm(total=len(tx_list), desc=self.method_name, unit="call") as pbar:
             for block_num, tx_hash, call_obj, tx_succeeded in tx_list:
                 tests_run += 1
-                # Trace against the parent block's state
                 state_block = hex(max(0, block_num - 1))
-                params: list[Any] = [call_obj, state_block]
-                if trace_params:
-                    params.append(trace_params)
+                params = _with_trace_params([call_obj, state_block], trace_params)
 
                 resp1, resp2 = await self.client.call_both(
                     self.endpoints, self.method_name, params
                 )
+                result = self.comparator.equal(resp1.response, resp2.response)
 
-                # Check for endpoint differences
-                if resp1.response != resp2.response:
+                if not result.equal:
                     diff_count += 1
-                    self.log(f"\n⚠ Diff for {tx_hash[:16]}... @ block {block_num}")
+                    self.log(
+                        f"\n⚠ {self.method_name} diff: "
+                        f"{tx_hash[:16]}... @ block {block_num}"
+                    )
                     self.reporter.save_diff(
                         method=self.method_name,
                         identifier=f"call_{tx_hash}",
                         request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
+                        response1=result.normalized1,
+                        response2=result.normalized2,
                     )
 
-                # Check for status/trace mismatches on each endpoint
-                for resp in [resp1, resp2]:
-                    trace_errored = self._trace_has_error(resp.response)
-                    if tx_succeeded and trace_errored:
+                # Check per-endpoint status/trace mismatch — a tx that succeeded
+                # on-chain but whose trace reports an error is a client bug
+                # regardless of whether the two endpoints agree.
+                for resp in (resp1, resp2):
+                    if tx_succeeded and self._trace_has_error(resp.response):
                         status_mismatch_count += 1
                         self.log(
                             f"\n🚨 Status mismatch ({resp.endpoint.name}): "
-                            f"tx {tx_hash[:16]}... succeeded on-chain but trace errored"
+                            f"tx {tx_hash[:16]}... succeeded on-chain "
+                            f"but trace errored"
                         )
                         self.reporter.save_diff(
                             method=self.method_name,
-                            identifier=f"status_mismatch_{resp.endpoint.name}_{tx_hash}",
+                            identifier=(
+                                f"status_mismatch_{resp.endpoint.name}_{tx_hash}"
+                            ),
                             request=resp.request,
                             response1={"tx_status": "success", "expected": "trace OK"},
                             response2={
@@ -426,7 +350,6 @@ class DebugTraceCallRunner(BaseRunner):
         - callTracer: result has "error" field
         - structLogger: result has "failed" = true
         """
-        # RPC-level error
         if response.get("error"):
             return True
 
@@ -434,11 +357,9 @@ class DebugTraceCallRunner(BaseRunner):
         if not result:
             return False
 
-        # callTracer format: {"type": "CALL", "error": "execution reverted", ...}
         if isinstance(result, dict):
             if result.get("error"):
                 return True
-            # structLogger format: {"gas": ..., "failed": true, ...}
             if result.get("failed"):
                 return True
 
@@ -462,39 +383,12 @@ class DebugTraceCallRunner(BaseRunner):
 
         return "unknown error"
 
-    def _tx_to_call(self, tx: dict[str, Any]) -> dict[str, Any]:
-        """Convert a transaction object to an eth_call-style object."""
-        call: dict[str, Any] = {}
-
-        # Basic fields
-        for key in ("from", "to", "gas", "value"):
-            if tx.get(key):
-                call[key] = tx[key]
-
-        # Data field (called 'input' in tx, 'data' in call)
-        if tx.get("input"):
-            call["data"] = tx["input"]
-
-        # Gas price - EIP-1559 vs legacy
-        if tx.get("maxFeePerGas"):
-            call["maxFeePerGas"] = tx["maxFeePerGas"]
-            if tx.get("maxPriorityFeePerGas"):
-                call["maxPriorityFeePerGas"] = tx["maxPriorityFeePerGas"]
-        elif tx.get("gasPrice"):
-            call["gasPrice"] = tx["gasPrice"]
-
-        # Access list (EIP-2930)
-        if tx.get("accessList"):
-            call["accessList"] = tx["accessList"]
-
-        return call
-
 
 class DebugGetBadBlocksRunner(BaseRunner):
     """Runner for debug_getBadBlocks.
 
-    Returns a list of the last 'bad blocks' that the client has seen on the network.
-    These are blocks that failed validation.
+    Returns a list of the last 'bad blocks' the client has seen.
+    Single call, no parameters.
     """
 
     method_name = "debug_getBadBlocks"
@@ -506,32 +400,11 @@ class DebugGetBadBlocksRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run debug_getBadBlocks comparison (single call, no parameters)."""
-        tests_run = 1
-        diff_count = 0
-
-        resp1, resp2 = await self.client.call_both(self.endpoints, self.method_name, [])
-
-        if resp1.response != resp2.response:
-            diff_count += 1
-            self.log(f"\n⚠ Diff in {self.method_name}")
-            self.reporter.save_diff(
-                method=self.method_name,
-                identifier="bad_blocks",
-                request=resp1.request,
-                response1=resp1.response,
-                response2=resp2.response,
-            )
-
-        self.log(f"\n{self.method_name}: {tests_run} test, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        return await self.compare_over([("bad_blocks", [])], total=1, unit="req")
 
 
 class DebugGetRawBlockRunner(BaseRunner):
-    """Runner for debug_getRawBlock.
-
-    Retrieves and returns the RLP-encoded block by number.
-    """
+    """Runner for debug_getRawBlock. Returns RLP-encoded block by number."""
 
     method_name = "debug_getRawBlock"
     description = "Get RLP-encoded block by number"
@@ -542,42 +415,12 @@ class DebugGetRawBlockRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run debug_getRawBlock tests across a block range."""
-        tests_run = 0
-        diff_count = 0
-        total_blocks = end_block - start_block + 1
-
-        with tqdm(total=total_blocks, desc=self.method_name, unit="blk") as pbar:
-            for block_num in range(start_block, end_block + 1):
-                tests_run += 1
-                params: list[Any] = [hex(block_num)]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff at block {block_num}")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"block_{block_num}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} blocks, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        inputs = [(f"block_{n}", [hex(n)]) for n in range(start_block, end_block + 1)]
+        return await self.compare_over(inputs, total=len(inputs), unit="blk")
 
 
 class DebugGetRawHeaderRunner(BaseRunner):
-    """Runner for debug_getRawHeader.
-
-    Returns an RLP-encoded header for a given block number.
-    """
+    """Runner for debug_getRawHeader. Returns RLP-encoded header."""
 
     method_name = "debug_getRawHeader"
     description = "Get RLP-encoded header by block number"
@@ -588,42 +431,12 @@ class DebugGetRawHeaderRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run debug_getRawHeader tests across a block range."""
-        tests_run = 0
-        diff_count = 0
-        total_blocks = end_block - start_block + 1
-
-        with tqdm(total=total_blocks, desc=self.method_name, unit="blk") as pbar:
-            for block_num in range(start_block, end_block + 1):
-                tests_run += 1
-                params: list[Any] = [hex(block_num)]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff at block {block_num}")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"block_{block_num}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} blocks, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        inputs = [(f"block_{n}", [hex(n)]) for n in range(start_block, end_block + 1)]
+        return await self.compare_over(inputs, total=len(inputs), unit="blk")
 
 
 class DebugGetRawReceiptsRunner(BaseRunner):
-    """Runner for debug_getRawReceipts.
-
-    Returns the consensus-encoding of all transaction receipts within a single block.
-    """
+    """Runner for debug_getRawReceipts. Returns RLP-encoded receipts."""
 
     method_name = "debug_getRawReceipts"
     description = "Get RLP-encoded receipts for a block"
@@ -634,35 +447,8 @@ class DebugGetRawReceiptsRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run debug_getRawReceipts tests across a block range."""
-        tests_run = 0
-        diff_count = 0
-        total_blocks = end_block - start_block + 1
-
-        with tqdm(total=total_blocks, desc=self.method_name, unit="blk") as pbar:
-            for block_num in range(start_block, end_block + 1):
-                tests_run += 1
-                params: list[Any] = [hex(block_num)]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff at block {block_num}")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"block_{block_num}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} blocks, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        inputs = [(f"block_{n}", [hex(n)]) for n in range(start_block, end_block + 1)]
+        return await self.compare_over(inputs, total=len(inputs), unit="blk")
 
 
 # Registry of debug runners
@@ -711,7 +497,6 @@ async def run_debug_methods(
     methods_to_run = methods or list(DEBUG_RUNNERS.keys())
     results: list[RunnerResult] = []
 
-    # Determine which tracers to test
     if test_all_tracers:
         tracers_to_test = tracers if tracers is not None else list(BUILTIN_TRACERS)
     else:
@@ -731,14 +516,12 @@ async def run_debug_methods(
                 tqdm.write(f"⚠ Unknown method '{method}', skipping")
                 continue
 
-            # Create output subdir for this tracer
             method_output = output_dir / tracer_display
             runner = DEBUG_RUNNERS[method](client, endpoints, method_output)
             result = await runner.run(
                 start_block, end_block, trace_config=current_config
             )
 
-            # Include tracer in result method name for clarity
             if len(tracers_to_test) > 1:
                 result = RunnerResult(
                     method=f"{result.method} ({tracer_display})",

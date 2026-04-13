@@ -164,10 +164,6 @@ markers = [
 source = ["src/json_rpc_scan"]
 branch = true
 parallel = true
-omit = [
-    "src/json_rpc_scan/__main__.py",
-    "src/json_rpc_scan/runners/*.py",  # Integration code requiring real RPC endpoints
-]
 
 [tool.coverage.report]
 exclude_lines = [

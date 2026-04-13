@@ -64,6 +64,13 @@ ALL_RUNNERS: dict[str, type] = {
 }
 
 
+# Aliases that mean "use the default Geth struct/opcode logger instead of a
+# named tracer." All matched case-insensitively.
+STRUCT_LOGGER_TRACER_ALIASES: frozenset[str] = frozenset(
+    {"structlogger", "struct", "opcode", "none"}
+)
+
+
 @dataclass
 class ScanContext:
     """Context for a scan run."""
@@ -77,7 +84,7 @@ class ScanContext:
     start_block: int
     end_block: int | None
     skip_compat: bool
-    namespaces: list[str] = field(default_factory=lambda: ["debug"])
+    namespaces: list[str]
     eth_call_config: EthCallConfig = field(default_factory=EthCallConfig)
     trace_options: TraceOptions = field(default_factory=TraceOptions)
 
@@ -187,6 +194,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Max concurrent requests (default: 10)",
     )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=3,
+        help="Retry attempts on transient errors (network / 5xx). 0 disables. "
+        "Default 3.",
+    )
+    parser.add_argument(
+        "--retry-base-delay",
+        type=float,
+        default=0.5,
+        help="Initial retry delay in seconds; doubles each subsequent retry "
+        "(default: 0.5).",
+    )
 
     return parser
 
@@ -263,7 +284,7 @@ def build_trace_config(args: argparse.Namespace) -> TraceConfig | None:
             return None
 
     tracer = args.tracer
-    if tracer and tracer.lower() in ("structlogger", "struct", "opcode", "none"):
+    if tracer and tracer.lower() in STRUCT_LOGGER_TRACER_ALIASES:
         tracer = None
 
     return TraceConfig(
@@ -318,6 +339,13 @@ def build_context(args: argparse.Namespace) -> ScanContext | None:
     if args.methods:
         # Explicit methods override namespace
         methods = [m.strip() for m in args.methods.split(",")]
+        unknown = [m for m in methods if m not in ALL_RUNNERS]
+        if unknown:
+            tqdm.write(
+                f"Error: unknown method(s): {', '.join(unknown)}. "
+                f"Run --list-methods to see available methods."
+            )
+            return None
         namespaces = []
         # Infer namespaces from methods
         for m in methods:
@@ -432,10 +460,12 @@ def print_summary(results: list[tuple[str, int, int]], output_dir: Path) -> int:
     print(f"  Total: {total_tests} tests, {total_diffs} differences")
     print()
 
-    if output_dir.exists() and not any(output_dir.iterdir()):
-        shutil.rmtree(output_dir)
+    if total_diffs == 0:
+        # Clean up an empty output dir so a green run leaves no trace.
+        if output_dir.exists() and not any(output_dir.iterdir()):
+            shutil.rmtree(output_dir)
         print("No differences found.")
-    elif total_diffs > 0:
+    else:
         print(f"Diff reports: {output_dir}")
 
     return 1 if total_diffs > 0 else 0
@@ -450,6 +480,8 @@ async def run(args: argparse.Namespace) -> int:
     async with RPCClient(
         timeout=ctx.config.timeout,
         max_concurrent=ctx.config.max_concurrent,
+        max_retries=args.max_retries,
+        retry_base_delay=args.retry_base_delay,
     ) as rpc_client:
         result = await detect_and_filter(rpc_client, ctx)
         if result is None:

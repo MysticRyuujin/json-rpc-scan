@@ -135,6 +135,17 @@ _DEBUG_COMMON: dict[str, bool] = {
     "debug_traceCall": True,
 }
 
+# Parity/OpenEthereum-style trace_* methods. Geth does NOT implement these;
+# Nethermind, Erigon, Reth, Besu (and most others) do.
+_TRACE_METHODS: tuple[str, ...] = (
+    "trace_block",
+    "trace_transaction",
+    "trace_call",
+    "trace_callMany",
+)
+_TRACE_SUPPORTED: dict[str, bool] = dict.fromkeys(_TRACE_METHODS, True)
+_TRACE_UNSUPPORTED: dict[str, bool] = dict.fromkeys(_TRACE_METHODS, False)
+
 CLIENT_METHOD_SUPPORT: dict[ClientType, dict[str, bool]] = {
     ClientType.GETH: {
         **_DEBUG_COMMON,
@@ -143,6 +154,8 @@ CLIENT_METHOD_SUPPORT: dict[ClientType, dict[str, bool]] = {
         "eth_getBlockReceipts": False,
         "eth_getProof": True,
         "eth_blobBaseFee": True,
+        # Geth does not implement Parity-style trace_* methods.
+        **_TRACE_UNSUPPORTED,
     },
     ClientType.NETHERMIND: {
         **_DEBUG_COMMON,
@@ -150,6 +163,7 @@ CLIENT_METHOD_SUPPORT: dict[ClientType, dict[str, bool]] = {
         "eth_getBlockReceipts": True,
         "eth_getProof": True,
         "eth_blobBaseFee": True,
+        **_TRACE_SUPPORTED,
     },
     ClientType.ERIGON: {
         **_DEBUG_COMMON,
@@ -158,6 +172,7 @@ CLIENT_METHOD_SUPPORT: dict[ClientType, dict[str, bool]] = {
         # Erigon requires --prune.include-commitment-history=true for eth_getProof
         "eth_getProof": True,
         "eth_blobBaseFee": True,
+        **_TRACE_SUPPORTED,
     },
     ClientType.BESU: {
         **_DEBUG_COMMON,
@@ -165,6 +180,7 @@ CLIENT_METHOD_SUPPORT: dict[ClientType, dict[str, bool]] = {
         "eth_getBlockReceipts": True,
         "eth_getProof": True,
         "eth_blobBaseFee": True,
+        **_TRACE_SUPPORTED,
     },
     ClientType.RETH: {
         **_DEBUG_COMMON,
@@ -172,6 +188,7 @@ CLIENT_METHOD_SUPPORT: dict[ClientType, dict[str, bool]] = {
         "eth_getBlockReceipts": True,
         "eth_getProof": True,
         "eth_blobBaseFee": True,
+        **_TRACE_SUPPORTED,
     },
     ClientType.NIMBUS: {
         **_DEBUG_COMMON,
@@ -179,6 +196,8 @@ CLIENT_METHOD_SUPPORT: dict[ClientType, dict[str, bool]] = {
         "eth_getBlockReceipts": True,
         "eth_getProof": True,
         "eth_blobBaseFee": True,
+        # Nimbus does not currently implement the Parity trace namespace.
+        **_TRACE_UNSUPPORTED,
     },
     ClientType.ETHREX: {
         **_DEBUG_COMMON,
@@ -186,14 +205,18 @@ CLIENT_METHOD_SUPPORT: dict[ClientType, dict[str, bool]] = {
         "eth_getBlockReceipts": True,
         "eth_getProof": True,
         "eth_blobBaseFee": True,
+        # Ethrex's trace namespace is not documented — assume unsupported
+        # until we can confirm. Users can --force-methods via compat overrides.
+        **_TRACE_UNSUPPORTED,
     },
     ClientType.UNKNOWN: {
-        # Assume all methods supported for unknown clients
+        # Assume all methods supported for unknown clients — user can override.
         **_DEBUG_COMMON,
         **_ETH_COMMON,
         "eth_getBlockReceipts": True,
         "eth_getProof": True,
         "eth_blobBaseFee": True,
+        **_TRACE_SUPPORTED,
     },
 }
 

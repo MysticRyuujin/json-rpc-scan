@@ -1,4 +1,4 @@
-# json-rpc-Scan
+# json-rpc-scan
 
 [![CI](https://github.com/MysticRyuujin/json-rpc-scan/actions/workflows/ci.yml/badge.svg)](https://github.com/MysticRyuujin/json-rpc-scan/actions/workflows/ci.yml)
 [![PyPI version](https://badge.fury.io/py/json-rpc-scan.svg)](https://badge.fury.io/py/json-rpc-scan)

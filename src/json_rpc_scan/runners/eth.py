@@ -1,7 +1,9 @@
 """Eth namespace JSON-RPC method runners.
 
-Implements comprehensive runners for all eth_* methods with full coverage of
-optional parameters and client-specific variations.
+Runners for all eth_* methods with full coverage of optional parameters and
+client-specific variations. Simple-iterator runners use `BaseRunner.compare_over`;
+multi-variant runners (eth_call, eth_estimateGas) loop manually over variants,
+calling `self.compare_one` per variant.
 
 Supported methods:
 - eth_getBlockByNumber: Get block by number (hydrated/non-hydrated)
@@ -53,11 +55,12 @@ See:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from tqdm import tqdm
 
-from json_rpc_scan.runners.base import BaseRunner, RunnerResult
+from json_rpc_scan.normalize import Normalizer, null_as_empty_bytes, sort_logs_by_index
+from json_rpc_scan.runners.base import BaseRunner, RunnerResult, tx_to_call_obj
 
 
 if TYPE_CHECKING:
@@ -75,10 +78,7 @@ DEFAULT_REWARD_PERCENTILES: list[float] = [10.0, 25.0, 50.0, 75.0, 90.0]
 
 @dataclass
 class StateOverride:
-    """State override for eth_call and eth_estimateGas.
-
-    Allows temporary modification of account state before executing a call.
-    """
+    """State override for eth_call and eth_estimateGas."""
 
     address: str
     balance: str | None = None
@@ -88,7 +88,6 @@ class StateOverride:
     state_diff: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to JSON-RPC parameter format."""
         result: dict[str, Any] = {}
         if self.balance is not None:
             result["balance"] = self.balance
@@ -105,10 +104,7 @@ class StateOverride:
 
 @dataclass
 class BlockOverride:
-    """Block override for eth_call (Geth-specific).
-
-    Allows modification of block context during call execution.
-    """
+    """Block override for eth_call (Geth-specific)."""
 
     number: str | None = None
     difficulty: str | None = None
@@ -119,7 +115,6 @@ class BlockOverride:
     base_fee: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to JSON-RPC parameter format."""
         result: dict[str, Any] = {}
         if self.number is not None:
             result["number"] = self.number
@@ -140,18 +135,11 @@ class BlockOverride:
 
 @dataclass
 class EthCallConfig:
-    """Configuration for eth_call tests.
+    """Configuration for eth_call tests."""
 
-    Controls which optional parameters and variations to test.
-    """
-
-    # Test with state overrides
     test_state_override: bool = True
-    # Test with block overrides (Geth only)
     test_block_override: bool = False
-    # Test at different block tags
     test_block_tags: bool = True
-    # Block tags to test (in addition to specific block numbers)
     block_tags: list[str] = field(default_factory=lambda: ["latest"])
 
 
@@ -159,23 +147,19 @@ class EthCallConfig:
 class LogFilterConfig:
     """Configuration for eth_getLogs tests."""
 
-    # Test with address filter
     test_address_filter: bool = True
-    # Test with topic filters
     test_topic_filter: bool = True
-    # Test with block range (fromBlock/toBlock)
     test_block_range: bool = True
-    # Test with blockhash parameter
     test_blockhash: bool = True
 
 
 # =============================================================================
-# Block Methods
+# Block methods
 # =============================================================================
 
 
 class EthGetBlockByNumberRunner(BaseRunner):
-    """Runner for eth_getBlockByNumber.
+    """Get block by number with hydration options.
 
     Tests both hydrated (full tx objects) and non-hydrated (tx hashes only) modes.
     """
@@ -189,51 +173,16 @@ class EthGetBlockByNumberRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_getBlockByNumber tests."""
-        tests_run = 0
-        diff_count = 0
-        total_blocks = end_block - start_block + 1
-
-        # Test both hydrated and non-hydrated
-        hydration_modes = [True, False]
-
-        with tqdm(
-            total=total_blocks * len(hydration_modes),
-            desc=self.method_name,
-            unit="req",
-        ) as pbar:
-            for block_num in range(start_block, end_block + 1):
-                for hydrated in hydration_modes:
-                    tests_run += 1
-                    params: list[Any] = [hex(block_num), hydrated]
-
-                    resp1, resp2 = await self.client.call_both(
-                        self.endpoints, self.method_name, params
-                    )
-
-                    if resp1.response != resp2.response:
-                        diff_count += 1
-                        mode = "hydrated" if hydrated else "hashes"
-                        self.log(f"\n⚠ Diff at block {block_num} ({mode})")
-                        self.reporter.save_diff(
-                            method=self.method_name,
-                            identifier=f"block_{block_num}_{mode}",
-                            request=resp1.request,
-                            response1=resp1.response,
-                            response2=resp2.response,
-                        )
-
-                    pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        inputs: list[tuple[str, list[Any]]] = []
+        for n in range(start_block, end_block + 1):
+            for hydrated in (True, False):
+                mode = "hydrated" if hydrated else "hashes"
+                inputs.append((f"block_{n}_{mode}", [hex(n), hydrated]))
+        return await self.compare_over(inputs, total=len(inputs), unit="req")
 
 
 class EthGetBlockByHashRunner(BaseRunner):
-    """Runner for eth_getBlockByHash.
-
-    Tests both hydrated and non-hydrated modes using block hashes.
-    """
+    """Get block by hash with hydration options."""
 
     method_name = "eth_getBlockByHash"
     description = "Get block by hash with hydration options"
@@ -244,59 +193,23 @@ class EthGetBlockByHashRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_getBlockByHash tests."""
-        tests_run = 0
-        diff_count = 0
-        total_blocks = end_block - start_block + 1
-        hydration_modes = [True, False]
-
-        with tqdm(
-            total=total_blocks * len(hydration_modes),
-            desc=self.method_name,
-            unit="req",
-        ) as pbar:
-            for block_num in range(start_block, end_block + 1):
-                # First get the block hash
-                block = await self.client.get_block(
-                    self.endpoints[0], block_num, full_transactions=False
-                )
-                if not block or not block.get("hash"):
-                    pbar.update(len(hydration_modes))
-                    continue
-
-                block_hash = block["hash"]
-
-                for hydrated in hydration_modes:
-                    tests_run += 1
-                    params: list[Any] = [block_hash, hydrated]
-
-                    resp1, resp2 = await self.client.call_both(
-                        self.endpoints, self.method_name, params
-                    )
-
-                    if resp1.response != resp2.response:
-                        diff_count += 1
-                        mode = "hydrated" if hydrated else "hashes"
-                        self.log(f"\n⚠ Diff at block {block_num} ({mode})")
-                        self.reporter.save_diff(
-                            method=self.method_name,
-                            identifier=f"block_{block_num}_{mode}",
-                            request=resp1.request,
-                            response1=resp1.response,
-                            response2=resp2.response,
-                        )
-
-                    pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        inputs: list[tuple[str, list[Any]]] = []
+        for block_num in range(start_block, end_block + 1):
+            block = await self.client.get_block(
+                self.endpoints[0], block_num, full_transactions=False
+            )
+            if not block or not block.get("hash"):
+                continue
+            for hydrated in (True, False):
+                mode = "hydrated" if hydrated else "hashes"
+                inputs.append((f"block_{block_num}_{mode}", [block["hash"], hydrated]))
+        return await self.compare_over(inputs, total=len(inputs), unit="req")
 
 
 class EthGetBlockReceiptsRunner(BaseRunner):
-    """Runner for eth_getBlockReceipts.
+    """Get all transaction receipts for a block.
 
-    Returns all transaction receipts for a block.
-    Note: Not supported by standard Geth - use debug_getRawReceipts instead.
+    Not supported by standard Geth — use debug_getRawReceipts there instead.
     """
 
     method_name = "eth_getBlockReceipts"
@@ -308,39 +221,12 @@ class EthGetBlockReceiptsRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_getBlockReceipts tests."""
-        tests_run = 0
-        diff_count = 0
-        total_blocks = end_block - start_block + 1
-
-        with tqdm(total=total_blocks, desc=self.method_name, unit="blk") as pbar:
-            for block_num in range(start_block, end_block + 1):
-                tests_run += 1
-                params: list[Any] = [hex(block_num)]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff at block {block_num}")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"block_{block_num}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        inputs = [(f"block_{n}", [hex(n)]) for n in range(start_block, end_block + 1)]
+        return await self.compare_over(inputs, total=len(inputs), unit="blk")
 
 
 class EthGetBlockTransactionCountByNumberRunner(BaseRunner):
-    """Runner for eth_getBlockTransactionCountByNumber."""
+    """Get transaction count by block number."""
 
     method_name = "eth_getBlockTransactionCountByNumber"
     description = "Get transaction count by block number"
@@ -351,39 +237,12 @@ class EthGetBlockTransactionCountByNumberRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_getBlockTransactionCountByNumber tests."""
-        tests_run = 0
-        diff_count = 0
-        total_blocks = end_block - start_block + 1
-
-        with tqdm(total=total_blocks, desc=self.method_name, unit="blk") as pbar:
-            for block_num in range(start_block, end_block + 1):
-                tests_run += 1
-                params: list[Any] = [hex(block_num)]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff at block {block_num}")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"block_{block_num}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        inputs = [(f"block_{n}", [hex(n)]) for n in range(start_block, end_block + 1)]
+        return await self.compare_over(inputs, total=len(inputs), unit="blk")
 
 
 class EthGetBlockTransactionCountByHashRunner(BaseRunner):
-    """Runner for eth_getBlockTransactionCountByHash."""
+    """Get transaction count by block hash."""
 
     method_name = "eth_getBlockTransactionCountByHash"
     description = "Get transaction count by block hash"
@@ -394,51 +253,23 @@ class EthGetBlockTransactionCountByHashRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_getBlockTransactionCountByHash tests."""
-        tests_run = 0
-        diff_count = 0
-        total_blocks = end_block - start_block + 1
-
-        with tqdm(total=total_blocks, desc=self.method_name, unit="blk") as pbar:
-            for block_num in range(start_block, end_block + 1):
-                block = await self.client.get_block(
-                    self.endpoints[0], block_num, full_transactions=False
-                )
-                if not block or not block.get("hash"):
-                    pbar.update(1)
-                    continue
-
-                tests_run += 1
-                params: list[Any] = [block["hash"]]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff at block {block_num}")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"block_{block_num}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        inputs: list[tuple[str, list[Any]]] = []
+        for block_num in range(start_block, end_block + 1):
+            block = await self.client.get_block(
+                self.endpoints[0], block_num, full_transactions=False
+            )
+            if block and block.get("hash"):
+                inputs.append((f"block_{block_num}", [block["hash"]]))
+        return await self.compare_over(inputs, total=len(inputs), unit="blk")
 
 
 # =============================================================================
-# Transaction Methods
+# Transaction methods
 # =============================================================================
 
 
 class EthGetTransactionByHashRunner(BaseRunner):
-    """Runner for eth_getTransactionByHash."""
+    """Get transaction by hash."""
 
     method_name = "eth_getTransactionByHash"
     description = "Get transaction by hash"
@@ -449,56 +280,28 @@ class EthGetTransactionByHashRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_getTransactionByHash for all transactions in range."""
         self.log(f"{self.method_name}: Scanning for transactions...")
-        tx_list: list[tuple[int, str]] = []
-
+        inputs: list[tuple[str, list[Any]]] = []
         for block_num in range(start_block, end_block + 1):
             block = await self.client.get_block(
                 self.endpoints[0], block_num, full_transactions=True
             )
-            if block and block.get("transactions"):
-                for tx in block["transactions"]:
-                    if isinstance(tx, dict) and tx.get("hash"):
-                        tx_list.append((block_num, tx["hash"]))
+            if not block or not block.get("transactions"):
+                continue
+            for tx in block["transactions"]:
+                if isinstance(tx, dict) and tx.get("hash"):
+                    inputs.append((f"tx_{tx['hash']}", [tx["hash"]]))
 
-        if not tx_list:
+        if not inputs:
             self.log(f"{self.method_name}: No transactions found")
             return RunnerResult(self.method_name, 0, 0)
 
-        self.log(f"{self.method_name}: Found {len(tx_list)} transactions")
-
-        tests_run = 0
-        diff_count = 0
-
-        with tqdm(total=len(tx_list), desc=self.method_name, unit="tx") as pbar:
-            for block_num, tx_hash in tx_list:
-                tests_run += 1
-                params: list[Any] = [tx_hash]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff for tx {tx_hash[:16]}... (block {block_num})")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"tx_{tx_hash}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} txs, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        self.log(f"{self.method_name}: Found {len(inputs)} transactions")
+        return await self.compare_over(inputs, total=len(inputs), unit="tx")
 
 
 class EthGetTransactionByBlockHashAndIndexRunner(BaseRunner):
-    """Runner for eth_getTransactionByBlockHashAndIndex."""
+    """Get transaction by block hash and index."""
 
     method_name = "eth_getTransactionByBlockHashAndIndex"
     description = "Get transaction by block hash and index"
@@ -509,56 +312,32 @@ class EthGetTransactionByBlockHashAndIndexRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_getTransactionByBlockHashAndIndex tests."""
         self.log(f"{self.method_name}: Scanning for transactions...")
-        test_cases: list[tuple[int, str, int]] = []  # (block_num, block_hash, tx_idx)
-
+        inputs: list[tuple[str, list[Any]]] = []
         for block_num in range(start_block, end_block + 1):
             block = await self.client.get_block(
                 self.endpoints[0], block_num, full_transactions=False
             )
-            if block and block.get("hash") and block.get("transactions"):
-                block_hash = block["hash"]
-                for tx_idx in range(len(block["transactions"])):
-                    test_cases.append((block_num, block_hash, tx_idx))
+            if not block or not block.get("hash") or not block.get("transactions"):
+                continue
+            for tx_idx in range(len(block["transactions"])):
+                inputs.append(
+                    (
+                        f"block_{block_num}_tx_{tx_idx}",
+                        [block["hash"], hex(tx_idx)],
+                    )
+                )
 
-        if not test_cases:
+        if not inputs:
             self.log(f"{self.method_name}: No transactions found")
             return RunnerResult(self.method_name, 0, 0)
 
-        self.log(f"{self.method_name}: Found {len(test_cases)} transactions")
-
-        tests_run = 0
-        diff_count = 0
-
-        with tqdm(total=len(test_cases), desc=self.method_name, unit="tx") as pbar:
-            for block_num, block_hash, tx_idx in test_cases:
-                tests_run += 1
-                params: list[Any] = [block_hash, hex(tx_idx)]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff for block {block_num} tx {tx_idx}")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"block_{block_num}_tx_{tx_idx}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} txs, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        self.log(f"{self.method_name}: Found {len(inputs)} transactions")
+        return await self.compare_over(inputs, total=len(inputs), unit="tx")
 
 
 class EthGetTransactionByBlockNumberAndIndexRunner(BaseRunner):
-    """Runner for eth_getTransactionByBlockNumberAndIndex."""
+    """Get transaction by block number and index."""
 
     method_name = "eth_getTransactionByBlockNumberAndIndex"
     description = "Get transaction by block number and index"
@@ -569,55 +348,32 @@ class EthGetTransactionByBlockNumberAndIndexRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_getTransactionByBlockNumberAndIndex tests."""
         self.log(f"{self.method_name}: Scanning for transactions...")
-        test_cases: list[tuple[int, int]] = []  # (block_num, tx_idx)
-
+        inputs: list[tuple[str, list[Any]]] = []
         for block_num in range(start_block, end_block + 1):
             block = await self.client.get_block(
                 self.endpoints[0], block_num, full_transactions=False
             )
-            if block and block.get("transactions"):
-                for tx_idx in range(len(block["transactions"])):
-                    test_cases.append((block_num, tx_idx))
+            if not block or not block.get("transactions"):
+                continue
+            for tx_idx in range(len(block["transactions"])):
+                inputs.append(
+                    (
+                        f"block_{block_num}_tx_{tx_idx}",
+                        [hex(block_num), hex(tx_idx)],
+                    )
+                )
 
-        if not test_cases:
+        if not inputs:
             self.log(f"{self.method_name}: No transactions found")
             return RunnerResult(self.method_name, 0, 0)
 
-        self.log(f"{self.method_name}: Found {len(test_cases)} transactions")
-
-        tests_run = 0
-        diff_count = 0
-
-        with tqdm(total=len(test_cases), desc=self.method_name, unit="tx") as pbar:
-            for block_num, tx_idx in test_cases:
-                tests_run += 1
-                params: list[Any] = [hex(block_num), hex(tx_idx)]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff for block {block_num} tx {tx_idx}")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"block_{block_num}_tx_{tx_idx}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} txs, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        self.log(f"{self.method_name}: Found {len(inputs)} transactions")
+        return await self.compare_over(inputs, total=len(inputs), unit="tx")
 
 
 class EthGetTransactionReceiptRunner(BaseRunner):
-    """Runner for eth_getTransactionReceipt."""
+    """Get transaction receipt by hash."""
 
     method_name = "eth_getTransactionReceipt"
     description = "Get transaction receipt by hash"
@@ -628,59 +384,28 @@ class EthGetTransactionReceiptRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_getTransactionReceipt for all transactions in range."""
         self.log(f"{self.method_name}: Scanning for transactions...")
-        tx_list: list[tuple[int, str]] = []
-
+        inputs: list[tuple[str, list[Any]]] = []
         for block_num in range(start_block, end_block + 1):
             block = await self.client.get_block(
                 self.endpoints[0], block_num, full_transactions=True
             )
-            if block and block.get("transactions"):
-                for tx in block["transactions"]:
-                    if isinstance(tx, dict) and tx.get("hash"):
-                        tx_list.append((block_num, tx["hash"]))
+            if not block or not block.get("transactions"):
+                continue
+            for tx in block["transactions"]:
+                if isinstance(tx, dict) and tx.get("hash"):
+                    inputs.append((f"tx_{tx['hash']}", [tx["hash"]]))
 
-        if not tx_list:
+        if not inputs:
             self.log(f"{self.method_name}: No transactions found")
             return RunnerResult(self.method_name, 0, 0)
 
-        self.log(f"{self.method_name}: Found {len(tx_list)} transactions")
-
-        tests_run = 0
-        diff_count = 0
-
-        with tqdm(total=len(tx_list), desc=self.method_name, unit="tx") as pbar:
-            for block_num, tx_hash in tx_list:
-                tests_run += 1
-                params: list[Any] = [tx_hash]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff for tx {tx_hash[:16]}... (block {block_num})")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"tx_{tx_hash}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} txs, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        self.log(f"{self.method_name}: Found {len(inputs)} transactions")
+        return await self.compare_over(inputs, total=len(inputs), unit="tx")
 
 
 class EthGetTransactionCountRunner(BaseRunner):
-    """Runner for eth_getTransactionCount (nonce).
-
-    Tests at multiple block tags/numbers to verify historical state.
-    """
+    """Get account nonce at various blocks."""
 
     method_name = "eth_getTransactionCount"
     description = "Get account nonce at various blocks"
@@ -691,16 +416,65 @@ class EthGetTransactionCountRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_getTransactionCount tests."""
-        # Collect unique addresses from transactions
         self.log(f"{self.method_name}: Collecting addresses from transactions...")
         addresses: set[str] = set()
-
         for block_num in range(start_block, end_block + 1):
             block = await self.client.get_block(
                 self.endpoints[0], block_num, full_transactions=True
             )
-            if block and block.get("transactions"):
+            if not block or not block.get("transactions"):
+                continue
+            for tx in block["transactions"]:
+                if isinstance(tx, dict):
+                    if tx.get("from"):
+                        addresses.add(tx["from"])
+                    if tx.get("to"):
+                        addresses.add(tx["to"])
+
+        if not addresses:
+            self.log(f"{self.method_name}: No addresses found")
+            return RunnerResult(self.method_name, 0, 0)
+
+        address_list = list(addresses)[:100]
+        self.log(f"{self.method_name}: Testing {len(address_list)} addresses")
+
+        block_params = [hex(end_block), "latest"]
+        inputs: list[tuple[str, list[Any]]] = [
+            (f"addr_{addr}_{block_param}", [addr, block_param])
+            for addr in address_list
+            for block_param in block_params
+        ]
+        return await self.compare_over(inputs, total=len(inputs), unit="req")
+
+
+# =============================================================================
+# Account / state methods
+# =============================================================================
+
+
+class EthGetBalanceRunner(BaseRunner):
+    """Get account balance at various blocks."""
+
+    method_name = "eth_getBalance"
+    description = "Get account balance at various blocks"
+
+    async def run(
+        self,
+        start_block: int,
+        end_block: int,
+        **kwargs: Any,
+    ) -> RunnerResult:
+        self.log(f"{self.method_name}: Collecting addresses...")
+        addresses: set[str] = set()
+        for block_num in range(start_block, end_block + 1):
+            block = await self.client.get_block(
+                self.endpoints[0], block_num, full_transactions=True
+            )
+            if not block:
+                continue
+            if block.get("miner"):
+                addresses.add(block["miner"])
+            if block.get("transactions"):
                 for tx in block["transactions"]:
                     if isinstance(tx, dict):
                         if tx.get("from"):
@@ -712,134 +486,28 @@ class EthGetTransactionCountRunner(BaseRunner):
             self.log(f"{self.method_name}: No addresses found")
             return RunnerResult(self.method_name, 0, 0)
 
-        # Limit to reasonable number of addresses
         address_list = list(addresses)[:100]
         self.log(f"{self.method_name}: Testing {len(address_list)} addresses")
 
-        tests_run = 0
-        diff_count = 0
-
-        # Test at specific block numbers and tags
-        block_params = [hex(end_block), "latest"]
-
-        total_tests = len(address_list) * len(block_params)
-        with tqdm(total=total_tests, desc=self.method_name, unit="req") as pbar:
-            for addr in address_list:
-                for block_param in block_params:
-                    tests_run += 1
-                    params: list[Any] = [addr, block_param]
-
-                    resp1, resp2 = await self.client.call_both(
-                        self.endpoints, self.method_name, params
-                    )
-
-                    if resp1.response != resp2.response:
-                        diff_count += 1
-                        self.log(f"\n⚠ Diff for {addr[:16]}... @ {block_param}")
-                        self.reporter.save_diff(
-                            method=self.method_name,
-                            identifier=f"addr_{addr}_{block_param}",
-                            request=resp1.request,
-                            response1=resp1.response,
-                            response2=resp2.response,
-                        )
-
-                    pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
-
-
-# =============================================================================
-# Account/State Methods
-# =============================================================================
-
-
-class EthGetBalanceRunner(BaseRunner):
-    """Runner for eth_getBalance.
-
-    Tests account balances at various block tags/numbers.
-    """
-
-    method_name = "eth_getBalance"
-    description = "Get account balance at various blocks"
-
-    async def run(
-        self,
-        start_block: int,
-        end_block: int,
-        **kwargs: Any,
-    ) -> RunnerResult:
-        """Run eth_getBalance tests."""
-        self.log(f"{self.method_name}: Collecting addresses...")
-        addresses: set[str] = set()
-
-        for block_num in range(start_block, end_block + 1):
-            block = await self.client.get_block(
-                self.endpoints[0], block_num, full_transactions=True
-            )
-            if block:
-                # Add miner/coinbase
-                if block.get("miner"):
-                    addresses.add(block["miner"])
-                # Add tx participants
-                if block.get("transactions"):
-                    for tx in block["transactions"]:
-                        if isinstance(tx, dict):
-                            if tx.get("from"):
-                                addresses.add(tx["from"])
-                            if tx.get("to"):
-                                addresses.add(tx["to"])
-
-        if not addresses:
-            self.log(f"{self.method_name}: No addresses found")
-            return RunnerResult(self.method_name, 0, 0)
-
-        address_list = list(addresses)[:100]
-        self.log(f"{self.method_name}: Testing {len(address_list)} addresses")
-
-        tests_run = 0
-        diff_count = 0
-
-        # Test at various block parameters
         block_params = [hex(end_block), "latest", "earliest"]
-
-        total_tests = len(address_list) * len(block_params)
-        with tqdm(total=total_tests, desc=self.method_name, unit="req") as pbar:
-            for addr in address_list:
-                for block_param in block_params:
-                    tests_run += 1
-                    params: list[Any] = [addr, block_param]
-
-                    resp1, resp2 = await self.client.call_both(
-                        self.endpoints, self.method_name, params
-                    )
-
-                    if resp1.response != resp2.response:
-                        diff_count += 1
-                        self.log(f"\n⚠ Diff for {addr[:16]}... @ {block_param}")
-                        self.reporter.save_diff(
-                            method=self.method_name,
-                            identifier=f"balance_{addr}_{block_param}",
-                            request=resp1.request,
-                            response1=resp1.response,
-                            response2=resp2.response,
-                        )
-
-                    pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        inputs: list[tuple[str, list[Any]]] = [
+            (f"balance_{addr}_{bp}", [addr, bp])
+            for addr in address_list
+            for bp in block_params
+        ]
+        return await self.compare_over(inputs, total=len(inputs), unit="req")
 
 
 class EthGetCodeRunner(BaseRunner):
-    """Runner for eth_getCode.
+    """Get contract code at various blocks.
 
-    Tests contract code retrieval at various blocks.
+    Uses ``null_as_empty_bytes`` normalizer because Ethrex returns ``null`` for
+    EOAs while Geth returns ``"0x"`` — semantically the same empty bytecode.
     """
 
     method_name = "eth_getCode"
     description = "Get contract code at various blocks"
+    extra_normalizers: ClassVar[list[Normalizer]] = [null_as_empty_bytes]
 
     async def run(
         self,
@@ -847,24 +515,22 @@ class EthGetCodeRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_getCode tests."""
         self.log(f"{self.method_name}: Collecting contract addresses...")
         contracts: set[str] = set()
-
         for block_num in range(start_block, end_block + 1):
             block = await self.client.get_block(
                 self.endpoints[0], block_num, full_transactions=True
             )
-            if block and block.get("transactions"):
-                for tx in block["transactions"]:
-                    # Contract calls (to address with data)
-                    if (
-                        isinstance(tx, dict)
-                        and tx.get("to")
-                        and tx.get("input")
-                        and tx["input"] != "0x"
-                    ):
-                        contracts.add(tx["to"])
+            if not block or not block.get("transactions"):
+                continue
+            for tx in block["transactions"]:
+                if (
+                    isinstance(tx, dict)
+                    and tx.get("to")
+                    and tx.get("input")
+                    and tx["input"] != "0x"
+                ):
+                    contracts.add(tx["to"])
 
         if not contracts:
             self.log(f"{self.method_name}: No contracts found")
@@ -873,44 +539,17 @@ class EthGetCodeRunner(BaseRunner):
         contract_list = list(contracts)[:50]
         self.log(f"{self.method_name}: Testing {len(contract_list)} contracts")
 
-        tests_run = 0
-        diff_count = 0
-
         block_params = [hex(end_block), "latest"]
-
-        total_tests = len(contract_list) * len(block_params)
-        with tqdm(total=total_tests, desc=self.method_name, unit="req") as pbar:
-            for addr in contract_list:
-                for block_param in block_params:
-                    tests_run += 1
-                    params: list[Any] = [addr, block_param]
-
-                    resp1, resp2 = await self.client.call_both(
-                        self.endpoints, self.method_name, params
-                    )
-
-                    if resp1.response != resp2.response:
-                        diff_count += 1
-                        self.log(f"\n⚠ Diff for {addr[:16]}... @ {block_param}")
-                        self.reporter.save_diff(
-                            method=self.method_name,
-                            identifier=f"code_{addr}_{block_param}",
-                            request=resp1.request,
-                            response1=resp1.response,
-                            response2=resp2.response,
-                        )
-
-                    pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        inputs: list[tuple[str, list[Any]]] = [
+            (f"code_{addr}_{bp}", [addr, bp])
+            for addr in contract_list
+            for bp in block_params
+        ]
+        return await self.compare_over(inputs, total=len(inputs), unit="req")
 
 
 class EthGetStorageAtRunner(BaseRunner):
-    """Runner for eth_getStorageAt.
-
-    Tests storage slot retrieval for contracts at various blocks.
-    """
+    """Get storage slot value at various blocks."""
 
     method_name = "eth_getStorageAt"
     description = "Get storage slot value at various blocks"
@@ -921,23 +560,22 @@ class EthGetStorageAtRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_getStorageAt tests."""
         self.log(f"{self.method_name}: Collecting contract addresses...")
         contracts: set[str] = set()
-
         for block_num in range(start_block, end_block + 1):
             block = await self.client.get_block(
                 self.endpoints[0], block_num, full_transactions=True
             )
-            if block and block.get("transactions"):
-                for tx in block["transactions"]:
-                    if (
-                        isinstance(tx, dict)
-                        and tx.get("to")
-                        and tx.get("input")
-                        and tx["input"] != "0x"
-                    ):
-                        contracts.add(tx["to"])
+            if not block or not block.get("transactions"):
+                continue
+            for tx in block["transactions"]:
+                if (
+                    isinstance(tx, dict)
+                    and tx.get("to")
+                    and tx.get("input")
+                    and tx["input"] != "0x"
+                ):
+                    contracts.add(tx["to"])
 
         if not contracts:
             self.log(f"{self.method_name}: No contracts found")
@@ -946,47 +584,24 @@ class EthGetStorageAtRunner(BaseRunner):
         contract_list = list(contracts)[:20]
         self.log(f"{self.method_name}: Testing {len(contract_list)} contracts")
 
-        tests_run = 0
-        diff_count = 0
-
-        # Common storage slots to check
         storage_slots = ["0x0", "0x1", "0x2"]
-
-        total_tests = len(contract_list) * len(storage_slots)
-        with tqdm(total=total_tests, desc=self.method_name, unit="req") as pbar:
-            for addr in contract_list:
-                for slot in storage_slots:
-                    tests_run += 1
-                    # Pad slot to 32 bytes
-                    padded_slot = "0x" + slot[2:].zfill(64)
-                    params: list[Any] = [addr, padded_slot, hex(end_block)]
-
-                    resp1, resp2 = await self.client.call_both(
-                        self.endpoints, self.method_name, params
+        inputs: list[tuple[str, list[Any]]] = []
+        for addr in contract_list:
+            for slot in storage_slots:
+                padded_slot = "0x" + slot[2:].zfill(64)
+                inputs.append(
+                    (
+                        f"storage_{addr}_slot_{slot}",
+                        [addr, padded_slot, hex(end_block)],
                     )
-
-                    if resp1.response != resp2.response:
-                        diff_count += 1
-                        self.log(f"\n⚠ Diff for {addr[:16]}... slot {slot}")
-                        self.reporter.save_diff(
-                            method=self.method_name,
-                            identifier=f"storage_{addr}_slot_{slot}",
-                            request=resp1.request,
-                            response1=resp1.response,
-                            response2=resp2.response,
-                        )
-
-                    pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+                )
+        return await self.compare_over(inputs, total=len(inputs), unit="req")
 
 
 class EthGetProofRunner(BaseRunner):
-    """Runner for eth_getProof.
+    """Get Merkle proof for account and storage.
 
-    Gets Merkle proofs for accounts and storage.
-    Note: Erigon requires --prune.include-commitment-history=true
+    Note: Erigon requires --prune.include-commitment-history=true.
     """
 
     method_name = "eth_getProof"
@@ -998,109 +613,58 @@ class EthGetProofRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_getProof tests."""
         self.log(f"{self.method_name}: Collecting addresses...")
         addresses: set[str] = set()
         contracts: set[str] = set()
-
         for block_num in range(start_block, end_block + 1):
             block = await self.client.get_block(
                 self.endpoints[0], block_num, full_transactions=True
             )
-            if block and block.get("transactions"):
-                for tx in block["transactions"]:
-                    if isinstance(tx, dict):
-                        if tx.get("from"):
-                            addresses.add(tx["from"])
-                        if tx.get("to"):
-                            if tx.get("input") and tx["input"] != "0x":
-                                contracts.add(tx["to"])
-                            else:
-                                addresses.add(tx["to"])
+            if not block or not block.get("transactions"):
+                continue
+            for tx in block["transactions"]:
+                if not isinstance(tx, dict):
+                    continue
+                if tx.get("from"):
+                    addresses.add(tx["from"])
+                if tx.get("to"):
+                    if tx.get("input") and tx["input"] != "0x":
+                        contracts.add(tx["to"])
+                    else:
+                        addresses.add(tx["to"])
 
         if not addresses and not contracts:
             self.log(f"{self.method_name}: No addresses found")
             return RunnerResult(self.method_name, 0, 0)
 
-        # Test EOAs with empty storage keys
         address_list = list(addresses)[:20]
-        # Test contracts with storage keys
         contract_list = list(contracts)[:10]
-
         self.log(
             f"{self.method_name}: Testing {len(address_list)} EOAs, "
             f"{len(contract_list)} contracts"
         )
 
-        tests_run = 0
-        diff_count = 0
-
-        total_tests = len(address_list) + len(contract_list)
-        with tqdm(total=total_tests, desc=self.method_name, unit="req") as pbar:
-            # Test EOAs (no storage keys)
-            for addr in address_list:
-                tests_run += 1
-                params: list[Any] = [addr, [], hex(end_block)]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff for EOA {addr[:16]}...")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"proof_eoa_{addr}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-            # Test contracts with storage keys
-            storage_keys = ["0x" + "0" * 64, "0x" + "0" * 63 + "1"]
-            for addr in contract_list:
-                tests_run += 1
-                params = [addr, storage_keys, hex(end_block)]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff for contract {addr[:16]}...")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"proof_contract_{addr}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        storage_keys = ["0x" + "0" * 64, "0x" + "0" * 63 + "1"]
+        inputs: list[tuple[str, list[Any]]] = []
+        for addr in address_list:
+            inputs.append((f"proof_eoa_{addr}", [addr, [], hex(end_block)]))
+        for addr in contract_list:
+            inputs.append(
+                (f"proof_contract_{addr}", [addr, storage_keys, hex(end_block)])
+            )
+        return await self.compare_over(inputs, total=len(inputs), unit="req")
 
 
 # =============================================================================
-# Call Methods
+# Call methods
 # =============================================================================
 
 
 class EthCallRunner(BaseRunner):
-    """Runner for eth_call.
+    """Execute call with optional state/block overrides.
 
-    Executes message calls with optional state and block overrides.
-    Tests with various parameter combinations:
-    - Basic call (to, data)
-    - With gas limit
-    - With value
-    - With state override (modify balance, code, storage)
-    - At different block tags
+    Multi-variant runner: per tx, tests basic call and optionally a state-override
+    variant. Calls `compare_one` directly for each variant.
     """
 
     method_name = "eth_call"
@@ -1112,119 +676,69 @@ class EthCallRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_call tests by replaying transactions."""
         config = kwargs.get("eth_call_config", EthCallConfig())
 
         self.log(f"{self.method_name}: Collecting transactions to replay...")
         tx_list: list[tuple[int, str, dict[str, Any]]] = []
-
         for block_num in range(start_block, end_block + 1):
             block = await self.client.get_block(
                 self.endpoints[0], block_num, full_transactions=True
             )
-            if block and block.get("transactions"):
-                for tx in block["transactions"]:
-                    if isinstance(tx, dict) and tx.get("to"):
-                        call_obj = self._tx_to_call(tx)
-                        tx_hash = tx.get("hash", f"unknown_{block_num}")
-                        tx_list.append((block_num, tx_hash, call_obj))
+            if not block or not block.get("transactions"):
+                continue
+            for tx in block["transactions"]:
+                if isinstance(tx, dict) and tx.get("to"):
+                    call_obj = tx_to_call_obj(tx)
+                    tx_hash = tx.get("hash", f"unknown_{block_num}")
+                    tx_list.append((block_num, tx_hash, call_obj))
 
         if not tx_list:
             self.log(f"{self.method_name}: No transactions found")
             return RunnerResult(self.method_name, 0, 0)
 
-        # Limit for performance
         tx_list = tx_list[:100]
         self.log(f"{self.method_name}: Testing {len(tx_list)} transactions")
 
         tests_run = 0
         diff_count = 0
 
-        # Calculate total tests based on config
-        test_variants = 1  # Basic call
-        if config.test_state_override:
-            test_variants += 1  # With state override
-
+        test_variants = 2 if config.test_state_override else 1
         total_tests = len(tx_list) * test_variants
         with tqdm(total=total_tests, desc=self.method_name, unit="call") as pbar:
             for block_num, tx_hash, call_obj in tx_list:
                 state_block = hex(max(0, block_num - 1))
 
-                # Test 1: Basic call
+                # Variant 1: basic call
                 tests_run += 1
-                params: list[Any] = [call_obj, state_block]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
+                if await self.compare_one(
+                    f"call_basic_{tx_hash}", [call_obj, state_block]
+                ):
                     diff_count += 1
-                    self.log(f"\n⚠ Diff for tx {tx_hash[:16]}... (basic)")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"call_basic_{tx_hash}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
                 pbar.update(1)
 
-                # Test 2: With state override (modify sender balance)
+                # Variant 2: state override (modify sender balance)
                 if config.test_state_override and call_obj.get("from"):
                     tests_run += 1
                     state_override = {
                         call_obj["from"]: {"balance": "0xFFFFFFFFFFFFFFFFFFFF"}
                     }
-                    params_override: list[Any] = [call_obj, state_block, state_override]
-
-                    resp1, resp2 = await self.client.call_both(
-                        self.endpoints, self.method_name, params_override
-                    )
-
-                    if resp1.response != resp2.response:
+                    if await self.compare_one(
+                        f"call_stateoverride_{tx_hash}",
+                        [call_obj, state_block, state_override],
+                    ):
                         diff_count += 1
-                        self.log(f"\n⚠ Diff for tx {tx_hash[:16]}... (state override)")
-                        self.reporter.save_diff(
-                            method=self.method_name,
-                            identifier=f"call_stateoverride_{tx_hash}",
-                            request=resp1.request,
-                            response1=resp1.response,
-                            response2=resp2.response,
-                        )
                     pbar.update(1)
 
         self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
         return RunnerResult(self.method_name, tests_run, diff_count)
 
-    def _tx_to_call(self, tx: dict[str, Any]) -> dict[str, Any]:
-        """Convert a transaction object to an eth_call-style object."""
-        call: dict[str, Any] = {}
-
-        for key in ("from", "to", "gas", "value"):
-            if tx.get(key):
-                call[key] = tx[key]
-
-        if tx.get("input"):
-            call["data"] = tx["input"]
-
-        if tx.get("maxFeePerGas"):
-            call["maxFeePerGas"] = tx["maxFeePerGas"]
-            if tx.get("maxPriorityFeePerGas"):
-                call["maxPriorityFeePerGas"] = tx["maxPriorityFeePerGas"]
-        elif tx.get("gasPrice"):
-            call["gasPrice"] = tx["gasPrice"]
-
-        if tx.get("accessList"):
-            call["accessList"] = tx["accessList"]
-
-        return call
-
 
 class EthEstimateGasRunner(BaseRunner):
-    """Runner for eth_estimateGas.
+    """Estimate gas with optional state overrides.
 
-    Estimates gas with optional state overrides.
+    Multi-variant: basic, with block parameter, and with state override.
+    `tx_to_call_obj` is called with `include_gas=False` because the gas field
+    is what's being estimated — passing it would short-circuit the result.
     """
 
     method_name = "eth_estimateGas"
@@ -1236,20 +750,24 @@ class EthEstimateGasRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_estimateGas tests."""
         self.log(f"{self.method_name}: Collecting transactions...")
         tx_list: list[tuple[int, str, dict[str, Any]]] = []
-
         for block_num in range(start_block, end_block + 1):
             block = await self.client.get_block(
                 self.endpoints[0], block_num, full_transactions=True
             )
-            if block and block.get("transactions"):
-                for tx in block["transactions"]:
-                    if isinstance(tx, dict) and tx.get("to"):
-                        call_obj = self._tx_to_call(tx)
-                        tx_hash = tx.get("hash", f"unknown_{block_num}")
-                        tx_list.append((block_num, tx_hash, call_obj))
+            if not block or not block.get("transactions"):
+                continue
+            for tx in block["transactions"]:
+                if isinstance(tx, dict) and tx.get("to"):
+                    call_obj = tx_to_call_obj(
+                        tx,
+                        include_gas=False,
+                        include_gas_pricing=False,
+                        include_access_list=False,
+                    )
+                    tx_hash = tx.get("hash", f"unknown_{block_num}")
+                    tx_list.append((block_num, tx_hash, call_obj))
 
         if not tx_list:
             self.log(f"{self.method_name}: No transactions found")
@@ -1261,99 +779,44 @@ class EthEstimateGasRunner(BaseRunner):
         tests_run = 0
         diff_count = 0
 
-        # Test variants: basic, with block param, with state override
-        test_variants = 3
-        total_tests = len(tx_list) * test_variants
-
+        total_tests = len(tx_list) * 3  # basic, with block, with state override
         with tqdm(total=total_tests, desc=self.method_name, unit="est") as pbar:
             for block_num, tx_hash, call_obj in tx_list:
                 state_block = hex(max(0, block_num - 1))
 
-                # Test 1: Basic (just call object)
                 tests_run += 1
-                params: list[Any] = [call_obj]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
+                if await self.compare_one(f"estimate_basic_{tx_hash}", [call_obj]):
                     diff_count += 1
-                    self.log(f"\n⚠ Diff for tx {tx_hash[:16]}... (basic)")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"estimate_basic_{tx_hash}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
                 pbar.update(1)
 
-                # Test 2: With block parameter
                 tests_run += 1
-                params_block: list[Any] = [call_obj, state_block]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params_block
-                )
-
-                if resp1.response != resp2.response:
+                if await self.compare_one(
+                    f"estimate_block_{tx_hash}", [call_obj, state_block]
+                ):
                     diff_count += 1
-                    self.log(f"\n⚠ Diff for tx {tx_hash[:16]}... (with block)")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"estimate_block_{tx_hash}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
                 pbar.update(1)
 
-                # Test 3: With state override
                 tests_run += 1
                 if call_obj.get("from"):
                     state_override = {
                         call_obj["from"]: {"balance": "0xFFFFFFFFFFFFFFFFFFFF"}
                     }
-                    params_override: list[Any] = [call_obj, state_block, state_override]
-
-                    resp1, resp2 = await self.client.call_both(
-                        self.endpoints, self.method_name, params_override
-                    )
-
-                    if resp1.response != resp2.response:
+                    if await self.compare_one(
+                        f"estimate_override_{tx_hash}",
+                        [call_obj, state_block, state_override],
+                    ):
                         diff_count += 1
-                        self.log(f"\n⚠ Diff for tx {tx_hash[:16]}... (state override)")
-                        self.reporter.save_diff(
-                            method=self.method_name,
-                            identifier=f"estimate_override_{tx_hash}",
-                            request=resp1.request,
-                            response1=resp1.response,
-                            response2=resp2.response,
-                        )
                 pbar.update(1)
 
         self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
         return RunnerResult(self.method_name, tests_run, diff_count)
 
-    def _tx_to_call(self, tx: dict[str, Any]) -> dict[str, Any]:
-        """Convert a transaction to a call object."""
-        call: dict[str, Any] = {}
-
-        for key in ("from", "to", "value"):
-            if tx.get(key):
-                call[key] = tx[key]
-
-        if tx.get("input"):
-            call["data"] = tx["input"]
-
-        return call
-
 
 class EthCreateAccessListRunner(BaseRunner):
-    """Runner for eth_createAccessList.
+    """Generate access list for a transaction (EIP-2930).
 
-    Creates an access list for a transaction, useful for EIP-2930 transactions.
+    Uses ``tx_to_call_obj`` with gas pricing and access-list stripped — passing
+    an existing access list would distort the result.
     """
 
     method_name = "eth_createAccessList"
@@ -1365,87 +828,44 @@ class EthCreateAccessListRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_createAccessList tests."""
         self.log(f"{self.method_name}: Collecting contract calls...")
-        tx_list: list[tuple[int, str, dict[str, Any]]] = []
-
+        inputs: list[tuple[str, list[Any]]] = []
         for block_num in range(start_block, end_block + 1):
             block = await self.client.get_block(
                 self.endpoints[0], block_num, full_transactions=True
             )
-            if block and block.get("transactions"):
-                for tx in block["transactions"]:
-                    # Only test contract calls
-                    if (
-                        isinstance(tx, dict)
-                        and tx.get("to")
-                        and tx.get("input")
-                        and tx["input"] != "0x"
-                    ):
-                        call_obj = self._tx_to_call(tx)
-                        tx_hash = tx.get("hash", f"unknown_{block_num}")
-                        tx_list.append((block_num, tx_hash, call_obj))
+            if not block or not block.get("transactions"):
+                continue
+            state_block = hex(max(0, block_num - 1))
+            for tx in block["transactions"]:
+                if (
+                    isinstance(tx, dict)
+                    and tx.get("to")
+                    and tx.get("input")
+                    and tx["input"] != "0x"
+                ):
+                    call_obj = tx_to_call_obj(
+                        tx, include_gas_pricing=False, include_access_list=False
+                    )
+                    tx_hash = tx.get("hash", f"unknown_{block_num}")
+                    inputs.append((f"accesslist_{tx_hash}", [call_obj, state_block]))
 
-        if not tx_list:
+        if not inputs:
             self.log(f"{self.method_name}: No contract calls found")
             return RunnerResult(self.method_name, 0, 0)
 
-        tx_list = tx_list[:50]
-        self.log(f"{self.method_name}: Testing {len(tx_list)} calls")
-
-        tests_run = 0
-        diff_count = 0
-
-        with tqdm(total=len(tx_list), desc=self.method_name, unit="call") as pbar:
-            for block_num, tx_hash, call_obj in tx_list:
-                tests_run += 1
-                state_block = hex(max(0, block_num - 1))
-                params: list[Any] = [call_obj, state_block]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff for tx {tx_hash[:16]}...")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"accesslist_{tx_hash}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
-
-    def _tx_to_call(self, tx: dict[str, Any]) -> dict[str, Any]:
-        """Convert a transaction to a call object."""
-        call: dict[str, Any] = {}
-
-        for key in ("from", "to", "gas", "value"):
-            if tx.get(key):
-                call[key] = tx[key]
-
-        if tx.get("input"):
-            call["data"] = tx["input"]
-
-        return call
+        inputs = inputs[:50]
+        self.log(f"{self.method_name}: Testing {len(inputs)} calls")
+        return await self.compare_over(inputs, total=len(inputs), unit="call")
 
 
 # =============================================================================
-# Fee Methods
+# Fee methods
 # =============================================================================
 
 
 class EthGasPriceRunner(BaseRunner):
-    """Runner for eth_gasPrice.
-
-    Returns the current gas price in wei.
-    """
+    """Get current gas price."""
 
     method_name = "eth_gasPrice"
     description = "Get current gas price"
@@ -1456,32 +876,11 @@ class EthGasPriceRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_gasPrice test (single call, no parameters)."""
-        tests_run = 1
-        diff_count = 0
-
-        resp1, resp2 = await self.client.call_both(self.endpoints, self.method_name, [])
-
-        if resp1.response != resp2.response:
-            diff_count += 1
-            self.log(f"\n⚠ Diff in {self.method_name}")
-            self.reporter.save_diff(
-                method=self.method_name,
-                identifier="gas_price",
-                request=resp1.request,
-                response1=resp1.response,
-                response2=resp2.response,
-            )
-
-        self.log(f"\n{self.method_name}: {tests_run} test, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        return await self.compare_over([("gas_price", [])], total=1, unit="req")
 
 
 class EthMaxPriorityFeePerGasRunner(BaseRunner):
-    """Runner for eth_maxPriorityFeePerGas.
-
-    Returns the max priority fee per gas suggestion.
-    """
+    """Get max priority fee suggestion."""
 
     method_name = "eth_maxPriorityFeePerGas"
     description = "Get max priority fee suggestion"
@@ -1492,33 +891,11 @@ class EthMaxPriorityFeePerGasRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_maxPriorityFeePerGas test."""
-        tests_run = 1
-        diff_count = 0
-
-        resp1, resp2 = await self.client.call_both(self.endpoints, self.method_name, [])
-
-        if resp1.response != resp2.response:
-            diff_count += 1
-            self.log(f"\n⚠ Diff in {self.method_name}")
-            self.reporter.save_diff(
-                method=self.method_name,
-                identifier="max_priority_fee",
-                request=resp1.request,
-                response1=resp1.response,
-                response2=resp2.response,
-            )
-
-        self.log(f"\n{self.method_name}: {tests_run} test, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        return await self.compare_over([("max_priority_fee", [])], total=1, unit="req")
 
 
 class EthFeeHistoryRunner(BaseRunner):
-    """Runner for eth_feeHistory.
-
-    Returns historical fee data with reward percentiles.
-    Tests various block counts and percentile arrays.
-    """
+    """Get historical fee data with reward percentiles."""
 
     method_name = "eth_feeHistory"
     description = "Get historical fee data with reward percentiles"
@@ -1529,59 +906,25 @@ class EthFeeHistoryRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_feeHistory tests with various parameters."""
-        tests_run = 0
-        diff_count = 0
-
-        # Test configurations: (block_count, percentiles)
         test_configs = [
-            # Basic: 10 blocks, common percentiles
             (10, [25.0, 50.0, 75.0]),
-            # Full range percentiles
             (5, [10.0, 25.0, 50.0, 75.0, 90.0]),
-            # Empty percentiles
             (10, []),
-            # Edge case percentiles
             (4, [0.0, 100.0]),
-            # Larger block count
             (100, [50.0]),
         ]
-
-        total_tests = len(test_configs)
-
-        with tqdm(total=total_tests, desc=self.method_name, unit="req") as pbar:
-            for block_count, percentiles in test_configs:
-                tests_run += 1
-                params: list[Any] = [hex(block_count), "latest", percentiles]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    pct_count = len(percentiles)
-                    self.log(f"\n⚠ Diff for {block_count} blocks, {pct_count} pcts")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"feehistory_{block_count}_{len(percentiles)}pct",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        inputs: list[tuple[str, list[Any]]] = [
+            (
+                f"feehistory_{block_count}_{len(percentiles)}pct",
+                [hex(block_count), "latest", percentiles],
+            )
+            for block_count, percentiles in test_configs
+        ]
+        return await self.compare_over(inputs, total=len(inputs), unit="req")
 
 
 class EthBlobBaseFeeRunner(BaseRunner):
-    """Runner for eth_blobBaseFee.
-
-    Returns the current blob base fee in wei.
-    Note: Only available post-Dencun (EIP-4844).
-    """
+    """Get current blob base fee (post-Dencun)."""
 
     method_name = "eth_blobBaseFee"
     description = "Get current blob base fee (post-Dencun)"
@@ -1592,44 +935,24 @@ class EthBlobBaseFeeRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_blobBaseFee test."""
-        tests_run = 1
-        diff_count = 0
-
-        resp1, resp2 = await self.client.call_both(self.endpoints, self.method_name, [])
-
-        if resp1.response != resp2.response:
-            diff_count += 1
-            self.log(f"\n⚠ Diff in {self.method_name}")
-            self.reporter.save_diff(
-                method=self.method_name,
-                identifier="blob_base_fee",
-                request=resp1.request,
-                response1=resp1.response,
-                response2=resp2.response,
-            )
-
-        self.log(f"\n{self.method_name}: {tests_run} test, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        return await self.compare_over([("blob_base_fee", [])], total=1, unit="req")
 
 
 # =============================================================================
-# Log Methods
+# Log methods
 # =============================================================================
 
 
 class EthGetLogsRunner(BaseRunner):
-    """Runner for eth_getLogs.
+    """Query logs with various filter options.
 
-    Tests various filter configurations:
-    - Block range (fromBlock, toBlock)
-    - Address filter
-    - Topic filters
-    - BlockHash filter
+    Uses ``sort_logs_by_index`` normalizer — the spec does not mandate log
+    ordering, so clients that return logs in different orders are both correct.
     """
 
     method_name = "eth_getLogs"
     description = "Query logs with various filter options"
+    extra_normalizers: ClassVar[list[Normalizer]] = [sort_logs_by_index]
 
     async def run(
         self,
@@ -1637,14 +960,8 @@ class EthGetLogsRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_getLogs tests with various filters."""
-        tests_run = 0
-        diff_count = 0
-
-        # Collect some addresses that emitted logs
         self.log(f"{self.method_name}: Scanning for log-emitting contracts...")
         log_addresses: set[str] = set()
-
         for block_num in range(start_block, min(start_block + 10, end_block + 1)):
             block = await self.client.get_block(
                 self.endpoints[0], block_num, full_transactions=True
@@ -1656,15 +973,13 @@ class EthGetLogsRunner(BaseRunner):
 
         address_list = list(log_addresses)[:5]
 
-        # Test configurations
-        test_cases: list[tuple[str, dict[str, Any]]] = []
+        test_cases: list[tuple[str, dict[str, Any]]] = [
+            (
+                "block_range",
+                {"fromBlock": hex(start_block), "toBlock": hex(end_block)},
+            ),
+        ]
 
-        # Test 1: Block range only
-        test_cases.append(
-            ("block_range", {"fromBlock": hex(start_block), "toBlock": hex(end_block)})
-        )
-
-        # Test 2: With address filter
         if address_list:
             test_cases.append(
                 (
@@ -1677,7 +992,6 @@ class EthGetLogsRunner(BaseRunner):
                 )
             )
 
-        # Test 3: With multiple addresses
         if len(address_list) >= 2:
             test_cases.append(
                 (
@@ -1690,7 +1004,6 @@ class EthGetLogsRunner(BaseRunner):
                 )
             )
 
-        # Test 4: With topic filter (common event signatures)
         transfer_topic = (
             "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
         )
@@ -1704,47 +1017,27 @@ class EthGetLogsRunner(BaseRunner):
                 },
             )
         )
-
-        # Test 5: Single block by number
         test_cases.append(
-            ("single_block", {"fromBlock": hex(end_block), "toBlock": hex(end_block)})
+            (
+                "single_block",
+                {"fromBlock": hex(end_block), "toBlock": hex(end_block)},
+            )
         )
 
         self.log(f"{self.method_name}: Running {len(test_cases)} filter tests")
-
-        with tqdm(total=len(test_cases), desc=self.method_name, unit="filter") as pbar:
-            for test_name, filter_obj in test_cases:
-                tests_run += 1
-                params: list[Any] = [filter_obj]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff for filter: {test_name}")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"logs_{test_name}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        inputs: list[tuple[str, list[Any]]] = [
+            (f"logs_{name}", [filt]) for name, filt in test_cases
+        ]
+        return await self.compare_over(inputs, total=len(inputs), unit="filter")
 
 
 # =============================================================================
-# Chain Info Methods
+# Chain info methods
 # =============================================================================
 
 
 class EthChainIdRunner(BaseRunner):
-    """Runner for eth_chainId."""
+    """Get chain ID."""
 
     method_name = "eth_chainId"
     description = "Get chain ID"
@@ -1755,29 +1048,11 @@ class EthChainIdRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_chainId test."""
-        tests_run = 1
-        diff_count = 0
-
-        resp1, resp2 = await self.client.call_both(self.endpoints, self.method_name, [])
-
-        if resp1.response != resp2.response:
-            diff_count += 1
-            self.log(f"\n⚠ Diff in {self.method_name}")
-            self.reporter.save_diff(
-                method=self.method_name,
-                identifier="chain_id",
-                request=resp1.request,
-                response1=resp1.response,
-                response2=resp2.response,
-            )
-
-        self.log(f"\n{self.method_name}: {tests_run} test, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        return await self.compare_over([("chain_id", [])], total=1, unit="req")
 
 
 class EthBlockNumberRunner(BaseRunner):
-    """Runner for eth_blockNumber."""
+    """Get latest block number."""
 
     method_name = "eth_blockNumber"
     description = "Get latest block number"
@@ -1788,29 +1063,11 @@ class EthBlockNumberRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_blockNumber test."""
-        tests_run = 1
-        diff_count = 0
-
-        resp1, resp2 = await self.client.call_both(self.endpoints, self.method_name, [])
-
-        if resp1.response != resp2.response:
-            diff_count += 1
-            self.log(f"\n⚠ Diff in {self.method_name}")
-            self.reporter.save_diff(
-                method=self.method_name,
-                identifier="block_number",
-                request=resp1.request,
-                response1=resp1.response,
-                response2=resp2.response,
-            )
-
-        self.log(f"\n{self.method_name}: {tests_run} test, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        return await self.compare_over([("block_number", [])], total=1, unit="req")
 
 
 class EthSyncingRunner(BaseRunner):
-    """Runner for eth_syncing."""
+    """Get sync status."""
 
     method_name = "eth_syncing"
     description = "Get sync status"
@@ -1821,34 +1078,16 @@ class EthSyncingRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_syncing test."""
-        tests_run = 1
-        diff_count = 0
-
-        resp1, resp2 = await self.client.call_both(self.endpoints, self.method_name, [])
-
-        if resp1.response != resp2.response:
-            diff_count += 1
-            self.log(f"\n⚠ Diff in {self.method_name}")
-            self.reporter.save_diff(
-                method=self.method_name,
-                identifier="syncing",
-                request=resp1.request,
-                response1=resp1.response,
-                response2=resp2.response,
-            )
-
-        self.log(f"\n{self.method_name}: {tests_run} test, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        return await self.compare_over([("syncing", [])], total=1, unit="req")
 
 
 # =============================================================================
-# Uncle Methods
+# Uncle methods
 # =============================================================================
 
 
 class EthGetUncleCountByBlockHashRunner(BaseRunner):
-    """Runner for eth_getUncleCountByBlockHash."""
+    """Get uncle count by block hash."""
 
     method_name = "eth_getUncleCountByBlockHash"
     description = "Get uncle count by block hash"
@@ -1859,46 +1098,18 @@ class EthGetUncleCountByBlockHashRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_getUncleCountByBlockHash tests."""
-        tests_run = 0
-        diff_count = 0
-        total_blocks = end_block - start_block + 1
-
-        with tqdm(total=total_blocks, desc=self.method_name, unit="blk") as pbar:
-            for block_num in range(start_block, end_block + 1):
-                block = await self.client.get_block(
-                    self.endpoints[0], block_num, full_transactions=False
-                )
-                if not block or not block.get("hash"):
-                    pbar.update(1)
-                    continue
-
-                tests_run += 1
-                params: list[Any] = [block["hash"]]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff at block {block_num}")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"uncle_count_hash_{block_num}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        inputs: list[tuple[str, list[Any]]] = []
+        for block_num in range(start_block, end_block + 1):
+            block = await self.client.get_block(
+                self.endpoints[0], block_num, full_transactions=False
+            )
+            if block and block.get("hash"):
+                inputs.append((f"uncle_count_hash_{block_num}", [block["hash"]]))
+        return await self.compare_over(inputs, total=len(inputs), unit="blk")
 
 
 class EthGetUncleCountByBlockNumberRunner(BaseRunner):
-    """Runner for eth_getUncleCountByBlockNumber."""
+    """Get uncle count by block number."""
 
     method_name = "eth_getUncleCountByBlockNumber"
     description = "Get uncle count by block number"
@@ -1909,39 +1120,15 @@ class EthGetUncleCountByBlockNumberRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_getUncleCountByBlockNumber tests."""
-        tests_run = 0
-        diff_count = 0
-        total_blocks = end_block - start_block + 1
-
-        with tqdm(total=total_blocks, desc=self.method_name, unit="blk") as pbar:
-            for block_num in range(start_block, end_block + 1):
-                tests_run += 1
-                params: list[Any] = [hex(block_num)]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff at block {block_num}")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"uncle_count_num_{block_num}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        inputs = [
+            (f"uncle_count_num_{n}", [hex(n)])
+            for n in range(start_block, end_block + 1)
+        ]
+        return await self.compare_over(inputs, total=len(inputs), unit="blk")
 
 
 class EthGetUncleByBlockHashAndIndexRunner(BaseRunner):
-    """Runner for eth_getUncleByBlockHashAndIndex."""
+    """Get uncle by block hash and index."""
 
     method_name = "eth_getUncleByBlockHashAndIndex"
     description = "Get uncle by block hash and index"
@@ -1952,60 +1139,42 @@ class EthGetUncleByBlockHashAndIndexRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_getUncleByBlockHashAndIndex tests."""
-        # Find blocks with uncles
         self.log(f"{self.method_name}: Scanning for blocks with uncles...")
-        uncle_tests: list[tuple[int, str, int]] = []  # (block_num, hash, uncle_idx)
-
+        inputs: list[tuple[str, list[Any]]] = []
         for block_num in range(start_block, end_block + 1):
             block = await self.client.get_block(
                 self.endpoints[0], block_num, full_transactions=False
             )
-            if block and block.get("hash") and block.get("uncles"):
-                block_hash = block["hash"]
+            if not block or not block.get("hash"):
+                continue
+            if block.get("uncles"):
                 for uncle_idx in range(len(block["uncles"])):
-                    uncle_tests.append((block_num, block_hash, uncle_idx))
+                    inputs.append(
+                        (
+                            f"uncle_hash_{block_num}_{uncle_idx}",
+                            [block["hash"], hex(uncle_idx)],
+                        )
+                    )
 
-        if not uncle_tests:
+        # Fallback: verify error-handling on a block without uncles
+        if not inputs:
             self.log(f"{self.method_name}: No uncles found in block range")
-            # Still test index 0 on first block to verify error handling
             block = await self.client.get_block(
                 self.endpoints[0], start_block, full_transactions=False
             )
             if block and block.get("hash"):
-                uncle_tests.append((start_block, block["hash"], 0))
-
-        tests_run = 0
-        diff_count = 0
-
-        with tqdm(total=len(uncle_tests), desc=self.method_name, unit="req") as pbar:
-            for block_num, block_hash, uncle_idx in uncle_tests:
-                tests_run += 1
-                params: list[Any] = [block_hash, hex(uncle_idx)]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
+                inputs.append(
+                    (
+                        f"uncle_hash_{start_block}_0",
+                        [block["hash"], hex(0)],
+                    )
                 )
 
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff for block {block_num} uncle {uncle_idx}")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"uncle_hash_{block_num}_{uncle_idx}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
-                    )
-
-                pbar.update(1)
-
-        self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        return await self.compare_over(inputs, total=len(inputs), unit="req")
 
 
 class EthGetUncleByBlockNumberAndIndexRunner(BaseRunner):
-    """Runner for eth_getUncleByBlockNumberAndIndex."""
+    """Get uncle by block number and index."""
 
     method_name = "eth_getUncleByBlockNumberAndIndex"
     description = "Get uncle by block number and index"
@@ -2016,53 +1185,30 @@ class EthGetUncleByBlockNumberAndIndexRunner(BaseRunner):
         end_block: int,
         **kwargs: Any,
     ) -> RunnerResult:
-        """Run eth_getUncleByBlockNumberAndIndex tests."""
         self.log(f"{self.method_name}: Scanning for blocks with uncles...")
-        uncle_tests: list[tuple[int, int]] = []  # (block_num, uncle_idx)
-
+        inputs: list[tuple[str, list[Any]]] = []
         for block_num in range(start_block, end_block + 1):
             block = await self.client.get_block(
                 self.endpoints[0], block_num, full_transactions=False
             )
             if block and block.get("uncles"):
                 for uncle_idx in range(len(block["uncles"])):
-                    uncle_tests.append((block_num, uncle_idx))
-
-        if not uncle_tests:
-            self.log(f"{self.method_name}: No uncles found, testing index 0")
-            uncle_tests.append((start_block, 0))
-
-        tests_run = 0
-        diff_count = 0
-
-        with tqdm(total=len(uncle_tests), desc=self.method_name, unit="req") as pbar:
-            for block_num, uncle_idx in uncle_tests:
-                tests_run += 1
-                params: list[Any] = [hex(block_num), hex(uncle_idx)]
-
-                resp1, resp2 = await self.client.call_both(
-                    self.endpoints, self.method_name, params
-                )
-
-                if resp1.response != resp2.response:
-                    diff_count += 1
-                    self.log(f"\n⚠ Diff for block {block_num} uncle {uncle_idx}")
-                    self.reporter.save_diff(
-                        method=self.method_name,
-                        identifier=f"uncle_num_{block_num}_{uncle_idx}",
-                        request=resp1.request,
-                        response1=resp1.response,
-                        response2=resp2.response,
+                    inputs.append(
+                        (
+                            f"uncle_num_{block_num}_{uncle_idx}",
+                            [hex(block_num), hex(uncle_idx)],
+                        )
                     )
 
-                pbar.update(1)
+        if not inputs:
+            self.log(f"{self.method_name}: No uncles found, testing index 0")
+            inputs.append((f"uncle_num_{start_block}_0", [hex(start_block), hex(0)]))
 
-        self.log(f"\n{self.method_name}: {tests_run} tests, {diff_count} diffs")
-        return RunnerResult(self.method_name, tests_run, diff_count)
+        return await self.compare_over(inputs, total=len(inputs), unit="req")
 
 
 # =============================================================================
-# Runner Registry
+# Runner registry
 # =============================================================================
 
 
@@ -2118,20 +1264,7 @@ async def run_eth_methods(
     methods: list[str] | None = None,
     eth_call_config: EthCallConfig | None = None,
 ) -> list[RunnerResult]:
-    """Run eth namespace method tests.
-
-    Args:
-        client: RPC client instance.
-        endpoints: Two endpoints to compare.
-        output_dir: Directory for diff output.
-        start_block: First block to test.
-        end_block: Last block to test.
-        methods: Specific methods to run (default: all).
-        eth_call_config: Configuration for eth_call tests.
-
-    Returns:
-        List of RunnerResult for each method tested.
-    """
+    """Run eth namespace method tests."""
     if eth_call_config is None:
         eth_call_config = EthCallConfig()
 
