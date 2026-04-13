@@ -111,6 +111,38 @@ class TestMethodSupport:
         """Unknown methods default to supported."""
         assert is_method_supported(ClientType.GETH, "some_unknown_method")
 
+    def test_geth_does_not_support_trace_methods(self):
+        """Parity trace_* methods are not in Geth — regression for a QA finding
+        where filter_methods silently passed them through against Geth."""
+        for method in (
+            "trace_block",
+            "trace_transaction",
+            "trace_call",
+            "trace_callMany",
+        ):
+            assert not is_method_supported(ClientType.GETH, method), (
+                f"Geth should not report support for {method}"
+            )
+
+    def test_nethermind_supports_trace_methods(self):
+        for method in (
+            "trace_block",
+            "trace_transaction",
+            "trace_call",
+            "trace_callMany",
+        ):
+            assert is_method_supported(ClientType.NETHERMIND, method)
+
+    def test_filter_methods_skips_trace_against_geth(self):
+        """End-to-end: filter_methods should drop trace_* when one side is Geth."""
+        geth = ClientInfo(ClientType.GETH, "Geth/v1", "Geth")
+        neth = ClientInfo(ClientType.NETHERMIND, "Nethermind/v1", "Nethermind")
+        methods = ["eth_chainId", "trace_block", "trace_transaction"]
+        supported, skipped = filter_methods(geth, neth, methods)
+        assert "eth_chainId" in supported
+        assert "trace_block" in skipped
+        assert "trace_transaction" in skipped
+
 
 class TestTracerSupport:
     """Tests for tracer support checking."""

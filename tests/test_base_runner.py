@@ -140,6 +140,55 @@ class TestCompareOneDiff:
         assert "0xaa" in saved_a
 
 
+class TestTransportErrorHandling:
+    """Regression (QA): both endpoints unreachable must surface as a diff.
+
+    Previously RPCClient returned `response={}` on network failure, and two
+    empty dicts compared equal via envelope-stripping — so a run against two
+    dead endpoints silently reported "0 diffs, exit 0". The fix folds
+    transport errors into response["error"] so the comparator treats them
+    like JSON-RPC errors.
+    """
+
+    async def test_both_endpoints_transport_errored_is_always_a_diff(self, tmp_path):
+        """Both sides unreachable with the same network error → always a diff.
+
+        Transport failures are infrastructure problems, not valid RPC
+        comparisons. Even if both endpoints return an identical
+        "connection refused", the run should register that as a diff so
+        the user sees the infra problem instead of a misleading "0 diffs".
+        """
+        runner, client = _make_runner(tmp_path)
+        err = {
+            "error": {
+                "code": -32603,
+                "message": "Connection refused",
+                "transport": True,
+            }
+        }
+        client.call_both.return_value = (
+            _resp(runner.endpoints[0], err),
+            _resp(runner.endpoints[1], err),
+        )
+        assert await runner.compare_one("test", []) is True
+
+    async def test_both_endpoints_errored_differently_is_diff(self, tmp_path):
+        runner, client = _make_runner(tmp_path)
+        r1 = {
+            "error": {
+                "code": -32603,
+                "message": "Connection refused",
+                "transport": True,
+            }
+        }
+        r2 = {"error": {"code": -32603, "message": "Timeout", "transport": True}}
+        client.call_both.return_value = (
+            _resp(runner.endpoints[0], r1),
+            _resp(runner.endpoints[1], r2),
+        )
+        assert await runner.compare_one("test", []) is True
+
+
 class TestCompareOneErrors:
     async def test_one_side_errored_is_a_diff(self, tmp_path):
         runner, client = _make_runner(tmp_path)

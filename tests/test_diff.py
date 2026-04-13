@@ -655,6 +655,29 @@ class TestDiffReporterNormalization:
             assert diffs == []
             assert not (Path(tmpdir) / "eth_chainId" / "chain_id").exists()
 
+    def test_transport_error_is_always_reported(self):
+        """Regression (QA): matching transport errors on both sides must still
+        produce a diff file so the user sees that no RPC calls actually
+        completed."""
+        computer = DiffComputer()
+        err = {"error": {"code": -32603, "message": "refused", "transport": True}}
+        diffs = computer.compute(err, err)
+        assert len(diffs) == 1
+        assert diffs[0].diff_type == "transport_error"
+
+    def test_transport_error_writes_diff_files(self):
+        """Reporter writes files for transport errors."""
+        with TemporaryDirectory() as tmpdir:
+            reporter = DiffReporter(
+                output_dir=Path(tmpdir),
+                endpoint1_name="A",
+                endpoint2_name="B",
+            )
+            err = {"error": {"code": -32603, "message": "x", "transport": True}}
+            diffs = reporter.save_diff("eth_chainId", "chain_id", {}, err, err)
+            assert len(diffs) == 1
+            assert (Path(tmpdir) / "eth_chainId" / "chain_id" / "diff.txt").exists()
+
     def test_extra_normalizer_plumbed_through(self):
         """Extra normalizers passed to DiffReporter reach DiffComputer."""
         with TemporaryDirectory() as tmpdir:

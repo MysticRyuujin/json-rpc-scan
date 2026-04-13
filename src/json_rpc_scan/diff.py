@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from json_rpc_scan.comparator import is_transport_error
 from json_rpc_scan.normalize import ALWAYS_ON, apply_all
 
 
@@ -57,6 +58,22 @@ class DiffComputer:
         response2 = apply_all(response2, self._normalizers)
 
         differences: list[Difference] = []
+
+        # Transport errors (network failure, 5xx after retries) are never
+        # "equal" — even when both sides match. Surface them explicitly so
+        # diff files get written and the user can see the infra problem.
+        t1 = is_transport_error(response1)
+        t2 = is_transport_error(response2)
+        if t1 or t2:
+            differences.append(
+                Difference(
+                    path="(transport)",
+                    diff_type="transport_error",
+                    value1=self._get_error_message(response1) if t1 else "OK",
+                    value2=self._get_error_message(response2) if t2 else "OK",
+                )
+            )
+            return differences
 
         # Check for error vs success mismatch
         is_err1 = self._is_error(response1)
@@ -347,6 +364,7 @@ class DiffReporter:
                 "error_vs_success",
                 "success_vs_error",
                 "error_message_differs",
+                "transport_error",
             ):
                 lines.append(f"    {self.endpoint1_name}: {diff.value1}")
                 lines.append(f"    {self.endpoint2_name}: {diff.value2}")

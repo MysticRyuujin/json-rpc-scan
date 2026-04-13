@@ -179,7 +179,10 @@ class TestRPCClient:
 
         assert response.error is not None
         assert "HTTP 500" in response.error
-        assert response.response == {}
+        # Transport errors are also folded into response["error"] so the
+        # comparator sees them as JSON-RPC errors (not empty dicts).
+        assert response.response["error"]["transport"] is True
+        assert "HTTP 500" in response.response["error"]["message"]
 
     @pytest.mark.asyncio
     async def test_call_request_error(self):
@@ -196,7 +199,8 @@ class TestRPCClient:
         response = await client.call(endpoint, "eth_blockNumber")
 
         assert response.error == "Connection refused"
-        assert response.response == {}
+        assert response.response["error"]["transport"] is True
+        assert response.response["error"]["message"] == "Connection refused"
 
     @pytest.mark.asyncio
     async def test_call_without_context_manager(self):

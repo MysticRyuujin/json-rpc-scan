@@ -117,6 +117,50 @@ class TestOptInNormalizers:
         assert comparator.equal(r1, r2).equal
 
 
+class TestTransportErrors:
+    """Transport errors always flag as diffs, even when identical.
+
+    Regression for a QA finding: running against two unreachable endpoints
+    previously reported "0 diffs, exit 0" because both sides returned the
+    same connection-refused message, which the comparator treated as
+    equal-both-errored. Transport-level failures are infrastructure
+    problems, not valid RPC comparisons.
+    """
+
+    @staticmethod
+    def _transport_err(message: str = "Connection refused") -> dict:
+        return {"error": {"code": -32603, "message": message, "transport": True}}
+
+    def test_identical_transport_errors_both_sides_is_a_diff(self):
+        r = self._transport_err()
+        result = ResponseComparator().equal(r, r)
+        assert not result.equal
+        assert result.both_errored
+
+    def test_different_transport_errors_is_a_diff(self):
+        r1 = self._transport_err("Connection refused")
+        r2 = self._transport_err("Timeout")
+        assert not ResponseComparator().equal(r1, r2).equal
+
+    def test_transport_error_one_side_is_a_diff(self):
+        r1 = {"result": "0x1"}
+        r2 = self._transport_err()
+        result = ResponseComparator().equal(r1, r2)
+        assert not result.equal
+        assert result.one_errored
+
+    def test_non_transport_matching_errors_still_equal(self):
+        """Sanity: a regular RPC error (no `transport: True`) matching on both
+        sides should still be `equal=True, both_errored=True` — only the
+        transport subtype flips to never-equal."""
+        err = {"code": -32000, "message": "execution reverted"}
+        r1 = {"error": err}
+        r2 = {"error": err}
+        result = ResponseComparator().equal(r1, r2)
+        assert result.equal
+        assert result.both_errored
+
+
 class TestNormalizedOutputPreserved:
     def test_result_exposes_normalized_responses(self):
         """Callers (DiffReporter) need the normalized dicts, not the originals."""

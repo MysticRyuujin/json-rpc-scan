@@ -280,6 +280,21 @@ class TestBuildContext:
         args = self._args(tmp_path, tracer_config="not json")
         assert build_context(args) is None
 
+    def test_unknown_method_bails(self, tmp_path, capsys):
+        """Regression (QA): --methods with an unknown name previously silently
+        exited 0 with 0 tests run because no namespace was inferred and the
+        dispatch functions were never called. Now we bail with a clear error."""
+        args = self._args(tmp_path, methods="eth_chainId,nonexistent_foo")
+        assert build_context(args) is None
+        err = capsys.readouterr().out
+        assert "nonexistent_foo" in err
+        assert "unknown method" in err.lower()
+
+    def test_unknown_method_without_valid_methods_bails(self, tmp_path, capsys):
+        args = self._args(tmp_path, methods="totally_fake")
+        assert build_context(args) is None
+        assert "totally_fake" in capsys.readouterr().out
+
 
 class TestPrintSummary:
     def test_exit_code_zero_when_no_diffs(self, tmp_path):
@@ -316,6 +331,21 @@ class TestPrintSummary:
         captured = capsys.readouterr()
         assert "18 tests" in captured.out  # 5+3+10
         assert "3 differences" in captured.out  # 1+2+0
+
+    def test_diffs_counted_but_empty_output_dir_does_not_say_no_diffs(
+        self, tmp_path, capsys
+    ):
+        """Regression (QA): when total_diffs>0 but the output dir happens to
+        be empty (comparator gate registered a diff but DiffComputer didn't
+        write files, e.g. pre-fix transport-error case), the summary used
+        to print "No differences found." contradicting "1 differences" —
+        confusing to both CI scripts and humans."""
+        empty_dir = tmp_path / "empty_but_diffs_reported"
+        empty_dir.mkdir()
+        code = print_summary([("m", 1, 1)], empty_dir)
+        out = capsys.readouterr().out
+        assert code == 1
+        assert "No differences found." not in out
 
 
 class TestListMethods:

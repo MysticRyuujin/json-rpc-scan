@@ -339,6 +339,13 @@ def build_context(args: argparse.Namespace) -> ScanContext | None:
     if args.methods:
         # Explicit methods override namespace
         methods = [m.strip() for m in args.methods.split(",")]
+        unknown = [m for m in methods if m not in ALL_RUNNERS]
+        if unknown:
+            tqdm.write(
+                f"Error: unknown method(s): {', '.join(unknown)}. "
+                f"Run --list-methods to see available methods."
+            )
+            return None
         namespaces = []
         # Infer namespaces from methods
         for m in methods:
@@ -453,10 +460,12 @@ def print_summary(results: list[tuple[str, int, int]], output_dir: Path) -> int:
     print(f"  Total: {total_tests} tests, {total_diffs} differences")
     print()
 
-    if output_dir.exists() and not any(output_dir.iterdir()):
-        shutil.rmtree(output_dir)
+    if total_diffs == 0:
+        # Clean up an empty output dir so a green run leaves no trace.
+        if output_dir.exists() and not any(output_dir.iterdir()):
+            shutil.rmtree(output_dir)
         print("No differences found.")
-    elif total_diffs > 0:
+    else:
         print(f"Diff reports: {output_dir}")
 
     return 1 if total_diffs > 0 else 0

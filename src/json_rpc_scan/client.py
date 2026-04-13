@@ -150,10 +150,17 @@ class RPCClient:
                 delay = self.retry_base_delay * (2**attempt)
                 await asyncio.sleep(delay)
 
+        # Fold transport-level errors (network failures, 5xx after retries)
+        # into the response dict shaped as a JSON-RPC error so downstream
+        # comparison treats them uniformly with RPC-level errors. Without
+        # this, two empty-dict responses compare equal and a run where both
+        # endpoints are unreachable silently reports "0 diffs, exit 0".
         return RPCResponse(
             endpoint=endpoint,
             request=payload,
-            response={},
+            response={
+                "error": {"code": -32603, "message": last_error, "transport": True}
+            },
             error=last_error,
         )
 
