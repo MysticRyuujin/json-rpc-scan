@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 import pytest
 
 from json_rpc_scan.diff import DiffComputer, Difference, DiffReporter
+from json_rpc_scan.normalize import ALWAYS_ON, sort_logs_by_index
 
 
 class TestDiffComputer:
@@ -585,3 +586,97 @@ class TestDiffReporter:
             assert "ep1_value" not in diff_dict
             assert "ep2_value" in diff_dict
             assert diff_dict["ep2_value"] == "new_value"
+
+
+class TestDiffComputerNormalization:
+    """Regression tests for always-on normalization in DiffComputer."""
+
+    def test_different_ids_produce_no_diff(self):
+        """JSON-RPC `id` differs between two calls — never a real diff."""
+        computer = DiffComputer()
+        r1 = {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
+        r2 = {"jsonrpc": "2.0", "id": 2, "result": "0x1"}
+        assert computer.compute(r1, r2) == []
+
+    def test_different_hex_case_produces_no_diff(self):
+        computer = DiffComputer()
+        r1 = {"id": 1, "result": "0xABCD"}
+        r2 = {"id": 1, "result": "0xabcd"}
+        assert computer.compute(r1, r2) == []
+
+    def test_extra_normalizer_applied_if_supplied(self):
+        """Caller can pass method-specific normalizers."""
+        computer = DiffComputer(normalizers=[*ALWAYS_ON, sort_logs_by_index])
+        r1 = {
+            "id": 1,
+            "result": [
+                {"blockNumber": "0x1", "logIndex": "0x0"},
+                {"blockNumber": "0x1", "logIndex": "0x1"},
+            ],
+        }
+        r2 = {
+            "id": 1,
+            "result": [
+                {"blockNumber": "0x1", "logIndex": "0x1"},
+                {"blockNumber": "0x1", "logIndex": "0x0"},
+            ],
+        }
+        assert computer.compute(r1, r2) == []
+
+    def test_default_normalizers_do_not_include_opt_in(self):
+        """Without opt-in, log-order differences DO appear as diffs."""
+        computer = DiffComputer()
+        r1 = {"id": 1, "result": [{"logIndex": "0x0"}, {"logIndex": "0x1"}]}
+        r2 = {"id": 1, "result": [{"logIndex": "0x1"}, {"logIndex": "0x0"}]}
+        assert computer.compute(r1, r2) != []
+
+    def test_normalization_is_idempotent_on_already_normalized_input(self):
+        """Callers that pre-normalize (like BaseRunner.compare_one) aren't harmed."""
+        computer = DiffComputer()
+        # Already has no id/jsonrpc, hex already lowercase
+        r1 = {"result": "0xabcd"}
+        r2 = {"result": "0xabcd"}
+        assert computer.compute(r1, r2) == []
+
+
+class TestDiffReporterNormalization:
+    """Regression tests for normalization wiring in DiffReporter."""
+
+    def test_different_ids_do_not_create_diff_files(self):
+        with TemporaryDirectory() as tmpdir:
+            reporter = DiffReporter(
+                output_dir=Path(tmpdir),
+                endpoint1_name="A",
+                endpoint2_name="B",
+            )
+            r1 = {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
+            r2 = {"jsonrpc": "2.0", "id": 99, "result": "0x1"}
+            diffs = reporter.save_diff("eth_chainId", "chain_id", {}, r1, r2)
+            assert diffs == []
+            assert not (Path(tmpdir) / "eth_chainId" / "chain_id").exists()
+
+    def test_extra_normalizer_plumbed_through(self):
+        """Extra normalizers passed to DiffReporter reach DiffComputer."""
+        with TemporaryDirectory() as tmpdir:
+            reporter = DiffReporter(
+                output_dir=Path(tmpdir),
+                endpoint1_name="A",
+                endpoint2_name="B",
+                extra_normalizers=[sort_logs_by_index],
+            )
+            r1 = {
+                "id": 1,
+                "result": [
+                    {"blockNumber": "0x1", "logIndex": "0x0"},
+                    {"blockNumber": "0x1", "logIndex": "0x1"},
+                ],
+            }
+            r2 = {
+                "id": 1,
+                "result": [
+                    {"blockNumber": "0x1", "logIndex": "0x1"},
+                    {"blockNumber": "0x1", "logIndex": "0x0"},
+                ],
+            }
+            diffs = reporter.save_diff("eth_getLogs", "logs_1", {}, r1, r2)
+            assert diffs == []

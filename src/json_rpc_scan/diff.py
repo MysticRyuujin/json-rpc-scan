@@ -6,9 +6,13 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from json_rpc_scan.normalize import ALWAYS_ON, apply_all
+
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from json_rpc_scan.normalize import Normalizer
 
 
 @dataclass
@@ -23,7 +27,19 @@ class Difference:
 
 
 class DiffComputer:
-    """Computes differences between two JSON responses."""
+    """Computes differences between two JSON responses.
+
+    Applies normalization before comparing so spec-irrelevant noise (JSON-RPC
+    envelope `id`/`jsonrpc`, hex casing) never shows up as a diff. Extra
+    normalizers can be supplied for method-specific semantics (e.g. log
+    ordering). Normalizers are idempotent, so callers that already normalized
+    (like `BaseRunner.compare_one`) aren't harmed by re-application.
+    """
+
+    def __init__(self, normalizers: list[Normalizer] | None = None) -> None:
+        self._normalizers: list[Normalizer] = (
+            [*ALWAYS_ON] if normalizers is None else normalizers
+        )
 
     def compute(
         self, response1: dict[str, Any], response2: dict[str, Any]
@@ -37,6 +53,9 @@ class DiffComputer:
         Returns:
             List of Difference objects describing the changes.
         """
+        response1 = apply_all(response1, self._normalizers)
+        response2 = apply_all(response2, self._normalizers)
+
         differences: list[Difference] = []
 
         # Check for error vs success mismatch
@@ -200,6 +219,8 @@ class DiffReporter:
         output_dir: Path,
         endpoint1_name: str,
         endpoint2_name: str,
+        *,
+        extra_normalizers: list[Normalizer] | None = None,
     ) -> None:
         """Initialize the reporter.
 
@@ -207,11 +228,16 @@ class DiffReporter:
             output_dir: Directory to save reports.
             endpoint1_name: Name of the first endpoint.
             endpoint2_name: Name of the second endpoint.
+            extra_normalizers: Opt-in normalizers to apply in addition to
+                the always-on ones (matches the runner's ``extra_normalizers``
+                so the reporter's diff reflects exactly what the comparator
+                gated on).
         """
         self.output_dir = output_dir
         self.endpoint1_name = endpoint1_name
         self.endpoint2_name = endpoint2_name
-        self._computer = DiffComputer()
+        normalizers: list[Normalizer] = [*ALWAYS_ON, *(extra_normalizers or [])]
+        self._computer = DiffComputer(normalizers=normalizers)
 
     def save_diff(
         self,

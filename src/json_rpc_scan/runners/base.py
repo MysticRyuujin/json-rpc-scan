@@ -67,6 +67,7 @@ class BaseRunner(ABC):
             output_dir=output_dir,
             endpoint1_name=endpoints[0].name,
             endpoint2_name=endpoints[1].name,
+            extra_normalizers=self.extra_normalizers,
         )
         self.comparator = ResponseComparator(extra_normalizers=self.extra_normalizers)
 
