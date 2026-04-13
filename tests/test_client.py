@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
@@ -291,7 +291,11 @@ class TestRPCClient:
         endpoint = Endpoint(name="test", url="http://localhost:8545")
         block_data = {"number": "0x1", "hash": "0xabc"}
         mock_response = MagicMock()
-        mock_response.json.return_value = {"jsonrpc": "2.0", "id": 1, "result": block_data}
+        mock_response.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": block_data,
+        }
         mock_response.raise_for_status = MagicMock()
 
         mock_client = AsyncMock()
@@ -347,7 +351,11 @@ class TestRPCClient:
         endpoint = Endpoint(name="test", url="http://localhost:8545")
         receipt_data = {"transactionHash": "0xabc", "status": "0x1"}
         mock_response = MagicMock()
-        mock_response.json.return_value = {"jsonrpc": "2.0", "id": 1, "result": receipt_data}
+        mock_response.json.return_value = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": receipt_data,
+        }
         mock_response.raise_for_status = MagicMock()
 
         mock_client = AsyncMock()

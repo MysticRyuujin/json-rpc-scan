@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-from json_rpc_scan.diff import DiffComputer, DiffReporter, Difference
+from json_rpc_scan.diff import DiffComputer, Difference, DiffReporter
 
 
 class TestDiffComputer:
@@ -178,7 +178,11 @@ class TestDiffComputer:
 
     def test_error_message_extraction_dict(self, computer: DiffComputer):
         """Test error message extraction when error is a dict."""
-        resp = {"jsonrpc": "2.0", "id": 1, "error": {"code": -1, "message": "Error msg"}}
+        resp = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -1, "message": "Error msg"},
+        }
         assert computer._get_error_message(resp) == "Error msg"
 
     def test_error_message_extraction_dict_no_message(self, computer: DiffComputer):
@@ -276,7 +280,9 @@ class TestDiffReporter:
             response1 = {"jsonrpc": "2.0", "id": 1, "result": "0x100"}
             response2 = {"jsonrpc": "2.0", "id": 1, "result": "0x200"}
 
-            diffs = reporter.save_diff("eth_blockNumber", "block_1", request, response1, response2)
+            diffs = reporter.save_diff(
+                "eth_blockNumber", "block_1", request, response1, response2
+            )
 
             assert len(diffs) == 1
             assert diffs[0].diff_type == "value_changed"
@@ -312,7 +318,9 @@ class TestDiffReporter:
             request = {"method": "eth_blockNumber", "params": []}
             response = {"jsonrpc": "2.0", "id": 1, "result": "0x100"}
 
-            diffs = reporter.save_diff("eth_blockNumber", "block_1", request, response, response)
+            diffs = reporter.save_diff(
+                "eth_blockNumber", "block_1", request, response, response
+            )
 
             assert len(diffs) == 0
 
