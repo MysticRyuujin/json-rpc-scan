@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -158,7 +159,7 @@ class TestRPCClient:
 
     @pytest.mark.asyncio
     async def test_call_http_error(self):
-        """Test RPC call with HTTP error."""
+        """Test RPC call with HTTP error (5xx retried exhaustively)."""
         endpoint = Endpoint(name="test", url="http://localhost:8545")
         mock_response = MagicMock()
         mock_response.status_code = 500
@@ -170,7 +171,8 @@ class TestRPCClient:
         )
         mock_client.post = AsyncMock(side_effect=http_error)
 
-        client = RPCClient()
+        # max_retries=0 to avoid sleeping during the test
+        client = RPCClient(max_retries=0)
         client._client = mock_client
 
         response = await client.call(endpoint, "eth_blockNumber")
@@ -181,14 +183,14 @@ class TestRPCClient:
 
     @pytest.mark.asyncio
     async def test_call_request_error(self):
-        """Test RPC call with request error."""
+        """Test RPC call with request error (network failure)."""
         endpoint = Endpoint(name="test", url="http://localhost:8545")
 
         mock_client = AsyncMock()
         request_error = httpx.RequestError("Connection refused", request=MagicMock())
         mock_client.post = AsyncMock(side_effect=request_error)
 
-        client = RPCClient()
+        client = RPCClient(max_retries=0)
         client._client = mock_client
 
         response = await client.call(endpoint, "eth_blockNumber")
@@ -379,7 +381,7 @@ class TestRPCClient:
         request_error = httpx.RequestError("Connection refused", request=MagicMock())
         mock_client.post = AsyncMock(side_effect=request_error)
 
-        client = RPCClient()
+        client = RPCClient(max_retries=0)
         client._client = mock_client
 
         receipt = await client.get_transaction_receipt(endpoint, "0xabc")
@@ -393,3 +395,139 @@ class TestRPCClient:
         # Exit without entering (client._client is None)
         await client.__aexit__(None, None, None)
         assert client._client is None
+
+
+class TestRetry:
+    """Retry-with-backoff behavior in RPCClient.call."""
+
+    @pytest.mark.asyncio
+    async def test_5xx_retried_and_eventually_succeeds(self):
+        """500 on first N attempts, then 200 → returns the successful response."""
+        endpoint = Endpoint(name="test", url="http://localhost:8545")
+
+        err_response = MagicMock()
+        err_response.status_code = 502
+        err_response.text = "bad gateway"
+        http_error = httpx.HTTPStatusError(
+            "Bad Gateway", request=MagicMock(), response=err_response
+        )
+
+        ok_response = MagicMock()
+        ok_response.json.return_value = {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
+        ok_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=[http_error, http_error, ok_response])
+
+        client = RPCClient(max_retries=3)
+        client._client = mock_client
+
+        response = await client.call(endpoint, "eth_blockNumber")
+
+        assert response.error is None
+        assert response.response == {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
+        assert mock_client.post.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_5xx_exhausts_retries_and_returns_error(self):
+        """Every attempt fails with 5xx → all retries used, error reported."""
+        endpoint = Endpoint(name="test", url="http://localhost:8545")
+
+        err_response = MagicMock()
+        err_response.status_code = 503
+        err_response.text = "unavailable"
+        http_error = httpx.HTTPStatusError(
+            "Unavailable", request=MagicMock(), response=err_response
+        )
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=http_error)
+
+        client = RPCClient(max_retries=3)
+        client._client = mock_client
+
+        response = await client.call(endpoint, "eth_blockNumber")
+
+        assert response.error is not None
+        assert "HTTP 503" in response.error
+        assert mock_client.post.call_count == 4  # initial + 3 retries
+
+    @pytest.mark.asyncio
+    async def test_4xx_not_retried(self):
+        """400-range is a client bug — retrying won't help, so return immediately."""
+        endpoint = Endpoint(name="test", url="http://localhost:8545")
+
+        err_response = MagicMock()
+        err_response.status_code = 400
+        err_response.text = "bad request"
+        http_error = httpx.HTTPStatusError(
+            "Bad Request", request=MagicMock(), response=err_response
+        )
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=http_error)
+
+        client = RPCClient(max_retries=3)
+        client._client = mock_client
+
+        response = await client.call(endpoint, "eth_blockNumber")
+
+        assert response.error is not None
+        assert "HTTP 400" in response.error
+        assert mock_client.post.call_count == 1  # no retries
+
+    @pytest.mark.asyncio
+    async def test_network_error_retried(self):
+        """Transient network errors (RequestError) are retried."""
+        endpoint = Endpoint(name="test", url="http://localhost:8545")
+
+        req_error = httpx.RequestError("Connection refused", request=MagicMock())
+        ok_response = MagicMock()
+        ok_response.json.return_value = {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
+        ok_response.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=[req_error, ok_response])
+
+        client = RPCClient(max_retries=3)
+        client._client = mock_client
+
+        response = await client.call(endpoint, "eth_blockNumber")
+
+        assert response.error is None
+        assert mock_client.post.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_max_retries_zero_disables_retry(self):
+        """max_retries=0 means a single attempt, no backoff loop."""
+        endpoint = Endpoint(name="test", url="http://localhost:8545")
+
+        req_error = httpx.RequestError("Connection refused", request=MagicMock())
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=req_error)
+
+        client = RPCClient(max_retries=0)
+        client._client = mock_client
+
+        response = await client.call(endpoint, "eth_blockNumber")
+
+        assert response.error == "Connection refused"
+        assert mock_client.post.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_retry_sleeps_use_exponential_backoff(self):
+        """Retry delays double each attempt: base, 2*base, 4*base, ..."""
+        endpoint = Endpoint(name="test", url="http://localhost:8545")
+        req_error = httpx.RequestError("err", request=MagicMock())
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=req_error)
+
+        client = RPCClient(max_retries=3, retry_base_delay=0.1)
+        client._client = mock_client
+
+        # The autouse fixture replaces asyncio.sleep; capture its calls here.
+        await client.call(endpoint, "eth_blockNumber")
+        sleep = asyncio.sleep  # the patched mock
+        # Between 4 attempts there are 3 sleeps.
+        delays = [call.args[0] for call in sleep.await_args_list]  # type: ignore[attr-defined]
+        assert delays == [0.1, 0.2, 0.4]

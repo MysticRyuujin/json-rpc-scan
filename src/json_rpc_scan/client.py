@@ -29,20 +29,35 @@ class RPCResponse:
 
 
 class RPCClient:
-    """Async HTTP client for making JSON-RPC requests."""
+    """Async HTTP client for making JSON-RPC requests.
+
+    Retries transient failures (network errors, 5xx) with exponential
+    backoff. 4xx is NOT retried — those are client-side errors that won't
+    resolve by retrying.
+    """
 
     def __init__(
         self,
         timeout: float = 60.0,
         max_concurrent: int = 10,
+        *,
+        max_retries: int = 3,
+        retry_base_delay: float = 0.5,
     ) -> None:
         """Initialize the RPC client.
 
         Args:
             timeout: Request timeout in seconds.
             max_concurrent: Maximum number of concurrent requests.
+            max_retries: How many times to retry on transient failure
+                (RequestError or 5xx). 0 disables retry. Default 3.
+            retry_base_delay: Initial delay between retries in seconds;
+                each subsequent retry doubles this (so 3 retries with
+                base 0.5s = 0.5, 1.0, 2.0). Default 0.5.
         """
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.retry_base_delay = retry_base_delay
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._client: httpx.AsyncClient | None = None
 
@@ -96,6 +111,20 @@ class RPCClient:
             headers.update(endpoint.headers)
 
         async with self._semaphore:
+            return await self._call_with_retry(endpoint, payload, headers)
+
+    async def _call_with_retry(
+        self,
+        endpoint: Endpoint,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+    ) -> RPCResponse:
+        """Post the payload with exponential-backoff retry on transient failure."""
+        assert self._client is not None  # guarded by caller
+        last_error: str = ""
+        attempts = self.max_retries + 1
+
+        for attempt in range(attempts):
             try:
                 response = await self._client.post(
                     endpoint.url,
@@ -109,19 +138,24 @@ class RPCClient:
                     response=response.json(),
                 )
             except httpx.HTTPStatusError as exc:
-                return RPCResponse(
-                    endpoint=endpoint,
-                    request=payload,
-                    response={},
-                    error=f"HTTP {exc.response.status_code}: {exc.response.text}",
-                )
+                status = exc.response.status_code
+                last_error = f"HTTP {status}: {exc.response.text}"
+                # 4xx is a client bug — retrying won't help. 5xx may be transient.
+                if status < 500:
+                    break
             except httpx.RequestError as exc:
-                return RPCResponse(
-                    endpoint=endpoint,
-                    request=payload,
-                    response={},
-                    error=str(exc),
-                )
+                last_error = str(exc)
+
+            if attempt < attempts - 1:
+                delay = self.retry_base_delay * (2**attempt)
+                await asyncio.sleep(delay)
+
+        return RPCResponse(
+            endpoint=endpoint,
+            request=payload,
+            response={},
+            error=last_error,
+        )
 
     async def call_both(
         self,

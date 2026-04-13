@@ -187,6 +187,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Max concurrent requests (default: 10)",
     )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=3,
+        help="Retry attempts on transient errors (network / 5xx). 0 disables. "
+        "Default 3.",
+    )
+    parser.add_argument(
+        "--retry-base-delay",
+        type=float,
+        default=0.5,
+        help="Initial retry delay in seconds; doubles each subsequent retry "
+        "(default: 0.5).",
+    )
 
     return parser
 
@@ -450,6 +464,8 @@ async def run(args: argparse.Namespace) -> int:
     async with RPCClient(
         timeout=ctx.config.timeout,
         max_concurrent=ctx.config.max_concurrent,
+        max_retries=args.max_retries,
+        retry_base_delay=args.retry_base_delay,
     ) as rpc_client:
         result = await detect_and_filter(rpc_client, ctx)
         if result is None:
