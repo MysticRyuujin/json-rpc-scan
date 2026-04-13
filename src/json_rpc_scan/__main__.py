@@ -64,6 +64,13 @@ ALL_RUNNERS: dict[str, type] = {
 }
 
 
+# Aliases that mean "use the default Geth struct/opcode logger instead of a
+# named tracer." All matched case-insensitively.
+STRUCT_LOGGER_TRACER_ALIASES: frozenset[str] = frozenset(
+    {"structlogger", "struct", "opcode", "none"}
+)
+
+
 @dataclass
 class ScanContext:
     """Context for a scan run."""
@@ -77,7 +84,7 @@ class ScanContext:
     start_block: int
     end_block: int | None
     skip_compat: bool
-    namespaces: list[str] = field(default_factory=lambda: ["debug"])
+    namespaces: list[str]
     eth_call_config: EthCallConfig = field(default_factory=EthCallConfig)
     trace_options: TraceOptions = field(default_factory=TraceOptions)
 
@@ -277,7 +284,7 @@ def build_trace_config(args: argparse.Namespace) -> TraceConfig | None:
             return None
 
     tracer = args.tracer
-    if tracer and tracer.lower() in ("structlogger", "struct", "opcode", "none"):
+    if tracer and tracer.lower() in STRUCT_LOGGER_TRACER_ALIASES:
         tracer = None
 
     return TraceConfig(
