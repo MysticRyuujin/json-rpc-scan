@@ -24,7 +24,7 @@ jobs:
       # GITHUB_TOKEN cannot trigger other workflows (security feature)
       - name: Run Release Please
         id: release
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@v5
         with:
           release-type: python
           token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
