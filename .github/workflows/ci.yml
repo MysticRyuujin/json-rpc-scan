@@ -133,7 +133,7 @@ jobs:
         run: uv sync --all-extras --dev
 
       - name: Run bandit security scan
-        run: uv run bandit -r src/ -c pyproject.toml || true
+        run: uv run bandit -r src/ -c pyproject.toml
 
   build:
     name: Build Package
@@ -199,6 +199,7 @@ jobs:
           if [[ "${{ needs.lint.result }}" != "success" ]] || \
              [[ "${{ needs.typecheck.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
+             [[ "${{ needs.security.result }}" != "success" ]] || \
              [[ "${{ needs.build.result }}" != "success" ]] || \
              [[ "${{ needs.docker.result }}" != "success" ]]; then
             echo "One or more required jobs failed"
