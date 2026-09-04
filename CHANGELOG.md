@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1](https://github.com/MysticRyuujin/json-rpc-scan/compare/v0.2.0...v0.2.1) (2026-09-04)
+
+
+### Bug Fixes
+
+* **lint:** ignore PLR0917 stabilized in ruff 0.16 ([#41](https://github.com/MysticRyuujin/json-rpc-scan/issues/41)) ([8b00035](https://github.com/MysticRyuujin/json-rpc-scan/commit/8b000356c4f1f8ff17815e80a7c7461811508610))
+
 ## [0.2.0](https://github.com/MysticRyuujin/json-rpc-scan/compare/v0.1.1...v0.2.0) (2026-04-13)
 
 
